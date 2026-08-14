@@ -371,3 +371,98 @@ All issuer/audience/TTL values are configurable (`IDP_JWT_ISSUER`,
 | Logging | stdlib `log/slog` JSON |
 | Container | Multi-stage `golang:1.24-alpine` → `alpine:3.20`, non-root, entrypoint `migrate → seed → serve` |
 | Secrets | All secrets via git-crypt-encrypted `.env`; fail fast on missing required vars |
+
+---
+
+## 12. Docker Compose orchestration (added during deployment)
+
+**Requirement:** Root `docker-compose.yml` orchestrating the stack; each
+service builds from its own directory and talks over the internal network.
+
+### Decisions
+
+1. **Service definition:** `idp` builds from `./idp`, maps host `8080` →
+   container `8080`, and joins the default compose network.
+2. **Env strategy: `${}` interpolation, not `env_file`.** The YAML references
+   `${DATABASE_URL}` / `${IDP_RSA_PRIVATE_KEY}` only. Compose resolves them
+   from the root `.env` (loaded automatically) and shell overrides win for
+   local testing. `env_file` was rejected because it injects *every* `.env`
+   entry verbatim (no override path, unrelated vars leak in). No secret ever
+   appears in the YAML (mandate from the task).
+3. **Healthcheck semantics: `/readyz`, not `/healthz`.** Compose health state
+   exists so downstream services can gate startup
+   (`depends_on: condition: service_healthy`); a healthy-but-DB-less IdP is
+   useless to them, so the probe pings the database (`/readyz`).
+   `wget -qO- http://localhost:8080/readyz` via busybox in the Alpine image —
+   no extra tooling. `interval: 15s`, `timeout: 5s`, `retries: 3`,
+   `start_period: 15s` (migrations + seed take ~10s).
+
+---
+
+## 13. IPv6 on the compose network (root-cause fix during first deploy)
+
+**Symptom:** first `docker compose up` failed at `migrate`:
+
+```
+dial tcp [2406:da14:311:1500:86b1:b64b:174e:e218]:5432: connect: network is unreachable
+```
+
+**Root-cause analysis:**
+
+- The Supabase hostname resolves **only to IPv6** in this deployment (no A
+  record; IPv4 TCP unreachable — the sandbox's only path to the internet is
+  an IPv6 WARP tunnel).
+- Docker's default bridge network is IPv4-only.
+- Go's `net.Dialer` returns a hard error immediately when the first (AAAA)
+  address fails with `ENETUNREACH`/`EADDRNOTAVAIL` — Happy Eyeballs only
+  races *pending* dials, so there is no fallback to an A record.
+
+### Options considered & tested
+
+1. **`net.ipv6.conf.all.disable_ipv6=1` sysctl** — tested first. Changed the
+   error to `cannot assign requested address`, but Go still dials the AAAA
+   record first and fails. Rejected.
+2. **`extra_hosts` IPv4 pin** — impossible: no A record exists to pin.
+   Rejected.
+3. **`network_mode: host`** — would work (the host has IPv6), but bypasses
+   the compose bridge and breaks the internal service-to-service network the
+   architecture mandates (mTLS over the Docker network). Rejected.
+4. **`enable_ipv6: true` on the compose default network** — **chosen.**
+   Gives containers a working IPv6 path to the database; fully declarative,
+   no hardcoded addresses, portable for teammates whose Docker supports
+   IPv6 bridges.
+
+### Decision
+
+`networks: default: enable_ipv6: true` in `docker-compose.yml`, with the
+reasoning documented as a comment next to it. Verified: container reaches
+Supabase over IPv6 and reports healthy.
+
+---
+
+## 14. Secrets provisioning in practice (git-crypt `.env`)
+
+**Decision:** All IdP runtime secrets live in the root `.env`, which is
+**committed to the repo encrypted by git-crypt** — the documented mechanism in
+`CONTRIBUTING.md` §3.a ("edit the decrypted `.env` file and commit it
+normally"). Teammates obtain plaintext via `git-crypt unlock`.
+
+Current contents: `DATABASE_URL`, `IDP_RSA_PRIVATE_KEY` (PEM, `\n`-escaped),
+plus optional `IDP_PORT`, `IDP_JWT_ISSUER`, `IDP_JWT_AUDIENCE`, `IDP_JWT_TTL`.
+The encrypted blob (~2 KB for a 508-byte plaintext) confirms the git-crypt
+filter is applied on commit.
+
+**Lesson from the field:** the initially provisioned `IDP_RSA_PRIVATE_KEY`
+was **truncated** (159 bytes — invalid PEM) and only surfaced at `serve` via
+the fail-fast path ("no PEM block found"). Rule adopted: any `.env` change is
+validated by actually starting the service (or `go run ./cmd/server serve`
+against a throwaway URL), never by eyeballing the file.
+
+**Operational notes:**
+
+- Regenerate a key with `go run ./cmd/server genkey` (from `idp/`); paste the
+  `\n`-escaped output into `.env`.
+- The committed `idp/.env.example` ships a clearly-labeled DEV-ONLY key so
+  the stack runs without touching `.env`.
+- A root `.env.example` is still missing (referenced by `CONTRIBUTING.md`);
+  flagged for whoever owns shared env setup.
