@@ -1,0 +1,8 @@
+.git
+.gitignore
+*.md
+.env
+.env.example
+bin/
+build/
+idp-server

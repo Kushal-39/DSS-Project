@@ -1,0 +1,38 @@
+# Master Docker Compose orchestrator for the Zero-Trust architecture.
+#
+# Secrets are NEVER hardcoded here. Values are resolved at runtime from the
+# git-crypt-encrypted root .env file (loaded automatically by Compose) or
+# the shell environment, e.g.:
+#
+#     DATABASE_URL          PostgreSQL connection string (Supabase)
+#     IDP_RSA_PRIVATE_KEY   IdP signing key, PEM, "\n"-escaped
+#
+# Each microservice (gateway, policy-engine, account-service,
+# payment-service, telemetry) is added as its own service as it lands.
+
+services:
+  idp:
+    build: ./idp
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      IDP_RSA_PRIVATE_KEY: ${IDP_RSA_PRIVATE_KEY}
+    healthcheck:
+      # /readyz pings the database, so the health state reflects whether the
+      # IdP can actually serve traffic — downstream services (e.g. the API
+      # Gateway) gate startup on this via depends_on: condition: service_healthy.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  default:
+    # The Supabase host resolves only to IPv6 on this deployment (no A
+    # record). Docker's default bridge is IPv4-only, so enable IPv6 on the
+    # bridge to give containers a working path to the database. AAAA-first
+    # resolution with no IPv6 route otherwise fails hard with "network is
+    # unreachable" and Go never falls back.
+    enable_ipv6: true
