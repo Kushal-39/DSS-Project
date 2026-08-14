@@ -18,6 +18,15 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       IDP_RSA_PRIVATE_KEY: ${IDP_RSA_PRIVATE_KEY}
+    healthcheck:
+      # /readyz pings the database, so the health state reflects whether the
+      # IdP can actually serve traffic — downstream services (e.g. the API
+      # Gateway) gate startup on this via depends_on: condition: service_healthy.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 networks:
   default:
