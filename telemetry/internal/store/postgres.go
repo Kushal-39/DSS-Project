@@ -416,15 +416,18 @@ func (p *Postgres) traceEvents(ctx context.Context, traceID string) ([]audit.Eve
 }
 
 // Purge enforces the retention window on both tables.
-func (p *Postgres) Purge(ctx context.Context, before time.Time) (int, error) {
-	tag, err := p.pool.Exec(ctx, `DELETE FROM audit_events WHERE occurred_at < $1`, before)
+func (p *Postgres) Purge(ctx context.Context, before time.Time) (Purged, error) {
+	events, err := p.pool.Exec(ctx, `DELETE FROM audit_events WHERE occurred_at < $1`, before)
 	if err != nil {
-		return 0, fmt.Errorf("store: purge audit events: %w", err)
+		return Purged{}, fmt.Errorf("store: purge audit events: %w", err)
 	}
-	if _, err := p.pool.Exec(ctx, `DELETE FROM spans WHERE started_at < $1`, before); err != nil {
-		return 0, fmt.Errorf("store: purge spans: %w", err)
+	spans, err := p.pool.Exec(ctx, `DELETE FROM spans WHERE started_at < $1`, before)
+	if err != nil {
+		// The events are already gone. Reporting the error by table says which
+		// half succeeded, and the next sweep retries the other.
+		return Purged{Events: int(events.RowsAffected())}, fmt.Errorf("store: purge spans: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return Purged{Events: int(events.RowsAffected()), Spans: int(spans.RowsAffected())}, nil
 }
 
 // Ping reports whether the database is reachable.

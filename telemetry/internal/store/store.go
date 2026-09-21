@@ -28,11 +28,34 @@ type Store interface {
 	Summary(ctx context.Context, since, now time.Time) (*audit.Summary, error)
 	// Trace assembles one distributed flow.
 	Trace(ctx context.Context, traceID string) (*audit.Trace, error)
-	// Purge deletes events older than the given time, returning the count.
-	Purge(ctx context.Context, before time.Time) (int, error)
+	// Purge deletes everything older than the given time — both the decisions
+	// and the spans — and reports what went, per table.
+	Purge(ctx context.Context, before time.Time) (Purged, error)
 	// Ping reports whether the backend is usable.
 	Ping(ctx context.Context) error
 }
+
+// Purged is what one retention sweep removed.
+//
+// The two counts are kept apart because they are different things: an expired
+// debug span and an expired security decision have different meanings, and a
+// single total would report "removed 1" for a sweep that removed a decision and
+// a span — or, when only spans expired, report nothing at all.
+//
+// Both backends must purge both tables. They did not: the in-memory store
+// deleted events and left every span in place, so a demo instance's trace view
+// grew without bound while the same sweep against Postgres stayed bounded.
+type Purged struct {
+	Events int
+	Spans  int
+}
+
+// Total is the number of rows removed overall.
+func (p Purged) Total() int { return p.Events + p.Spans }
+
+// Empty reports whether the sweep removed nothing, which is the normal case and
+// not worth a log line.
+func (p Purged) Empty() bool { return p.Events == 0 && p.Spans == 0 }
 
 // clampLimit keeps a caller-supplied page size inside sane bounds.
 func clampLimit(limit int) int {

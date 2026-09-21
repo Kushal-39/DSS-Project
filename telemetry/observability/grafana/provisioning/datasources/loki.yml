@@ -1,9 +1,12 @@
 # Grafana datasource provisioning.
 #
-# Grafana exists here for one job: ad-hoc log exploration over Loki. The audit
-# dashboard (counts, denials, traces) is served by the telemetry service
-# itself at /dashboard, so this container has no dashboards to provision and
-# nothing to configure by hand after startup.
+# Grafana exists here for one job: reading the centralized log store (Loki).
+# The audit dashboard (counts, denials, traces) is served by the telemetry
+# service itself at /dashboard, because those numbers come from PostgreSQL and
+# not from the log store — so Grafana is not the audit UI and must not become
+# one. The log views it does own are provisioned as files alongside this one:
+# see ../dashboards/dashboards.yml, and nothing here has to be configured by
+# hand after startup.
 
 apiVersion: 1
 

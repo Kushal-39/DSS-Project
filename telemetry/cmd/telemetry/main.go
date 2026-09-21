@@ -314,8 +314,14 @@ func purgeLoop(ctx context.Context, cfg *config.Config, auditStore store.Store, 
 			logger.Warn("purge_failed", "error", err)
 			return
 		}
-		if removed > 0 {
-			logger.Info("purge_complete", "removed", removed, "older_than", cutoff)
+		if !removed.Empty() {
+			// The two tables are named separately: a sweep that removed one
+			// decision and one span is not the same event as one that removed
+			// two decisions, and a single total cannot tell you which happened.
+			logger.Info("purge_complete",
+				"removed_events", removed.Events,
+				"removed_spans", removed.Spans,
+				"older_than", cutoff)
 		}
 	}
 

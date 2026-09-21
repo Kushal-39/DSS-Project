@@ -143,22 +143,41 @@ func (m *Memory) Trace(_ context.Context, traceID string) (*audit.Trace, error) 
 }
 
 // Purge removes events older than the given time.
-func (m *Memory) Purge(_ context.Context, before time.Time) (int, error) {
+// Purge enforces retention on both tables, exactly like the Postgres backend.
+//
+// The interface is one contract with two implementations, and for a while this
+// one only deleted events: with `TELEMETRY_STORE=memory` the trace view grew
+// without bound while the same retention setting kept Postgres bounded. A demo
+// mode that behaves differently from production is a demo of something else.
+func (m *Memory) Purge(_ context.Context, before time.Time) (Purged, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	kept := m.events[:0]
-	removed := 0
+	keptEvents := m.events[:0]
+	events := 0
 	for _, event := range m.events {
 		if event.OccurredAt.Before(before) {
 			delete(m.eventIDs, event.ID)
-			removed++
+			events++
 			continue
 		}
-		kept = append(kept, event)
+		keptEvents = append(keptEvents, event)
 	}
-	m.events = kept
-	return removed, nil
+	m.events = keptEvents
+
+	keptSpans := m.spans[:0]
+	spans := 0
+	for _, span := range m.spans {
+		if span.Start.Before(before) {
+			delete(m.spanKeys, span.TraceID+":"+span.SpanID)
+			spans++
+			continue
+		}
+		keptSpans = append(keptSpans, span)
+	}
+	m.spans = keptSpans
+
+	return Purged{Events: events, Spans: spans}, nil
 }
 
 // Ping always succeeds for an in-process store.

@@ -288,7 +288,9 @@ curl -X POST localhost:8080/login -d '{"username":"admin","password":"admin123"}
 | Centralized logging | Loki held streams for every container in the project — including `policy-engine`, which was added later and needed no configuration — labelled `service`/`container`/`level`/`event` |
 | Person 3's real contract | the *nested* payload from `docs/policymaker.md` (`input.subject.user_id`, `input.subject.roles`, `input.context.ip_address`) → subject, roles and client address all promoted into stored rows; the flat variant from `docs/division.md` is also accepted |
 | The Policy Engine's own verdicts | with `--set decision_logs.console=true`, OPA 1.20.2's decision log reached the trail via container logs: `AUTHZ / PERMIT / policy_allowed` for a 50 transfer and `AUTHZ / DENY / policy_denied` for 60000, each with its `decision_id` as the request id, subject `uuid-1111-2222`, `roles [customer]` and client `192.168.1.50`/`203.0.113.9` — the engine needed no code change and no log shim |
-| Grafana | Loki datasource provisioned on first boot |
+| Grafana (datasource) | Loki datasource provisioned on first boot, with the trace-id field that pivots a log line into Jaeger |
+| Grafana (dashboards) | the log dashboard provisioned from JSON into the *Zero-Trust* folder and rendering live data: 5.86k log lines, 4 errors, 12 warnings, 710 log rows across the log panels |
+| Every dashboard query is valid and returns data | all 11 panel targets executed through Grafana's own Loki proxy (`/api/datasources/proxy/uid/loki/…`) rather than only written down: 12 series for volume by service, and the counting panels reading `0` in a quiet window instead of "No data" |
 | Tests | `go test -race ./...` green; the Postgres integration test green against real Postgres |
 | OTLP logs signal | a decision exported as an OTel log record was stored as `AUTHZ / DENY / threat_level_high`, attributed to the resource's `service.name`, and joined to the span on the same trace id |
 | Policy Engine's ABAC envelope | `{"input":{…"context":{"ip":…}}}` → subject, action, resource and client address all promoted to first-class fields (verified in the database, not just the API) |
@@ -298,6 +300,7 @@ curl -X POST localhost:8080/login -d '{"username":"admin","password":"admin123"}
 | Read auth and the dashboard sign-in | no credential → 401, wrong token → 401; `GET /dashboard?token=<read token>` → 302 to `/dashboard` with an `HttpOnly; SameSite=Strict` cookie (no token left in the URL), and that cookie alone then opened the dashboard **and** the API the page calls. `/healthz`, `/readyz` and `/metrics` stay open for the platform |
 | Container hardening is real | `docker inspect` on the running services: `ReadonlyRootfs=true`, `CapDrop=[ALL]`, `no-new-privileges:true` — and both still serve traffic, so the hardening is exercised rather than declared |
 | The migration rollback works | against real PostgreSQL: `migrate` idempotent, `status` reported version 1 not dirty, the DOWN script dropped `audit_events` and `spans` while leaving telemetry's own `telemetry_schema_migrations`, and a re-run restored the schema |
+| Retention actually deletes, and says what | an expired decision and an expired span were ingested, the service restarted, and it logged `purge_complete removed_events 1 removed_spans 1` — with the recent rows still present, so the sweep is bounded and honest rather than merely configured |
 | Probe traffic stays out of the trail | before the fix, 60 of 62 events in a 15 minute window were the IdP's `/readyz`; after it, no new probe is stored and the window holds only decisions |
 | Clock skew is visible | a record dated 6 hours ahead was stored (forensics keeps it) and counted: `telemetry_events_future_dated_total 1` plus an `ingest_future_dated` warning naming the delta and the cause |
 
@@ -326,7 +329,7 @@ destructive toggle in it would eventually be set in a deployment.
 
 ### Bugs this run found (and fixed)
 
-The end-to-end runs were not a formality; they caught eleven real defects that
+The end-to-end runs were not a formality; they caught thirteen real defects that
 unit tests written from the same assumptions would have missed:
 
 1. **OTLP ids were mangled.** The decoder confused hex characters with bytes,
@@ -377,10 +380,26 @@ unit tests written from the same assumptions would have missed:
     way was silently dropped. `body` is now parsed when it holds a JSON object
     (`TestDecodeLogsReadsARecordMarshalledIntoTheBody`).
 
+12. **The retention log under-reported what it deleted.** `Telemetry purge`
+    removes from two tables — `audit_events` and `spans` — and reported one
+    count, so a sweep that removed one decision *and* one span logged
+    `removed 1`, and a sweep that removed only expired spans logged nothing at
+    all. It now reports `removed_events` and `removed_spans` separately, because
+    those are different things and an operator deciding whether the trail is
+    shrinking has to be able to tell them apart.
+13. **`TELEMETRY_STORE=memory` never purged spans.** One interface, two
+    implementations, and the demo backend deleted events while keeping every
+    span forever — so the trace view grew without bound in exactly the mode a
+    reviewer is most likely to run, while the same retention setting kept
+    Postgres bounded. A demo that behaves differently from production is a demo
+    of something else.
+
 Finding 10 was found by exporting a decision three ways and diffing the stored
 rows, which is the only way this class of bug shows up: every counter was
 healthy, the pipeline reported `dropped 0`, and the trail was simply missing
-what it exists to record.
+what it exists to record. Finding 12 was found the same way — by reading the
+service's own log line next to the database and noticing the arithmetic did not
+add up.
 
 Two integration-shape findings came out of the same run: SELinux denies
 container access to `/var/run/docker.sock` even for root (hence
@@ -404,7 +423,8 @@ telemetry/
   internal/config/        fail-fast configuration
   internal/db/            pool + embedded migration runner
   migrations/             the audit schema, embedded in the binary
-  observability/          Loki, Promtail and Grafana configuration
+  observability/          Loki, Promtail and Grafana configuration, including
+                          the provisioned log dashboards (as code)
 ```
 
 See `observability/README.md` for why there are two log paths,

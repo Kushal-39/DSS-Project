@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,10 +199,23 @@ func TestMemoryTraceAssemblesOneFlow(t *testing.T) {
 func TestMemoryPurgeEnforcesRetention(t *testing.T) {
 	ctx := context.Background()
 	memory := NewMemory()
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
 
 	if _, err := memory.InsertEvents(ctx, []audit.Event{
-		exampleEvent(clock.Add(-400*24*time.Hour), "idp", audit.DecisionDeny, "invalid_credentials", ""),
-		exampleEvent(clock.Add(-time.Minute), "idp", audit.DecisionPermit, "ok", ""),
+		exampleEvent(clock.Add(-400*24*time.Hour), "idp", audit.DecisionDeny, "invalid_credentials", traceID),
+		exampleEvent(clock.Add(-time.Minute), "idp", audit.DecisionPermit, "ok", traceID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Spans expire with the same sweep. The in-memory store used to keep every
+	// span forever, so a demo instance's trace view grew without bound while the
+	// identical retention setting kept Postgres bounded — one interface, two
+	// behaviours, and the wrong one was the one a reviewer would see.
+	if _, err := memory.InsertSpans(ctx, []audit.Span{
+		{TraceID: traceID, SpanID: "aaaaaaaaaaaaaaaa", Service: "idp", Name: "POST /login",
+			Start: clock.Add(-400 * 24 * time.Hour), End: clock.Add(-400*24*time.Hour + time.Millisecond)},
+		{TraceID: traceID, SpanID: "bbbbbbbbbbbbbbbb", Service: "idp", Name: "POST /login",
+			Start: clock.Add(-time.Minute), End: clock.Add(-time.Minute + time.Millisecond)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -210,11 +224,50 @@ func TestMemoryPurgeEnforcesRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != 1 {
-		t.Errorf("purged %d events, want 1", removed)
+	// The counts are per table, because the two are different things and a
+	// single total cannot say which went.
+	if removed.Events != 1 || removed.Spans != 1 {
+		t.Errorf("purged %+v, want one event and one span", removed)
+	}
+	if removed.Total() != 2 {
+		t.Errorf("Total() = %d, want 2", removed.Total())
 	}
 	if memory.Len() != 1 {
 		t.Errorf("store holds %d events, want the recent one kept", memory.Len())
+	}
+
+	flow, err := memory.Trace(ctx, traceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flow == nil || len(flow.Spans) != 1 {
+		t.Errorf("trace holds %d spans, want only the unexpired one", len(flow.Spans))
+	}
+
+	// A sweep with nothing to do is empty rather than a zero count, so the
+	// caller can stay quiet instead of logging a sweep that did nothing.
+	quiet, err := memory.Purge(ctx, clock.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quiet.Empty() || quiet.Total() != 0 {
+		t.Errorf("second sweep = %+v, want nothing removed", quiet)
+	}
+
+	// An expired span with no expired event must still be reported: this is the
+	// case a single events-count would have logged as "removed 0".
+	if _, err := memory.InsertSpans(ctx, []audit.Span{
+		{TraceID: traceID, SpanID: "cccccccccccccccc", Service: "idp", Name: "GET /jwks.json",
+			Start: clock.Add(-400 * 24 * time.Hour), End: clock.Add(-400*24*time.Hour + time.Millisecond)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spansOnly, err := memory.Purge(ctx, clock.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spansOnly.Spans != 1 || spansOnly.Events != 0 {
+		t.Errorf("span-only sweep = %+v, want exactly one span removed", spansOnly)
 	}
 
 	// A purged record must not leave a stale id behind, or re-ingesting it
@@ -437,12 +490,25 @@ func TestPostgresStore(t *testing.T) {
 		if _, err := postgres.InsertEvents(ctx, []audit.Event{stale}); err != nil {
 			t.Fatal(err)
 		}
+		// A span that expired belongs to no one's query any more, and must go
+		// with the event: the trace view is assembled from both tables.
+		if _, err := postgres.InsertSpans(ctx, []audit.Span{{
+			TraceID: strings.Repeat("f", 32), SpanID: strings.Repeat("1", 16),
+			Service: marker, Name: "expired", Start: now.Add(-400 * 24 * time.Hour),
+			End: now.Add(-400*24*time.Hour + time.Millisecond),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+
 		removed, err := postgres.Purge(ctx, now.Add(-30*24*time.Hour))
 		if err != nil {
 			t.Fatalf("Purge: %v", err)
 		}
-		if removed < 1 {
-			t.Errorf("purged %d rows, want at least the 400-day-old one", removed)
+		if removed.Events < 1 {
+			t.Errorf("purged %d events, want at least the 400-day-old one", removed.Events)
+		}
+		if removed.Spans < 1 {
+			t.Errorf("purged %d spans, want the expired one: a sparse trace view is a wrong one", removed.Spans)
 		}
 		remaining, err := postgres.QueryEvents(ctx, audit.Filter{Service: marker, Since: now.Add(-400 * 24 * time.Hour)})
 		if err != nil {

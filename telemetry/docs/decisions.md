@@ -136,8 +136,17 @@ binary with `go:embed`. Grafana is deployed too, but only as Loki's front end.
 * The questions are specific (blocked requests, unauthorized attempts, trace
   flows) and the API already answers them; wiring a generic tool to specific
   questions is more work than drawing them.
-* Grafana remains available for what it is genuinely better at: ad-hoc
-  exploration of the log store, which is why it is still in the compose file.
+* Grafana remains available for what it is genuinely better at: reading the log
+  store, which is why it is still in the compose file.
+
+**The log views are provisioned as code, and that is the split.** "Grafana is for
+logs, the service is for decisions" is only useful if the log views survive a
+fresh clone, so `observability/grafana/provisioning/dashboards/` holds the
+provider and the dashboard JSON, and a change to them is a reviewable diff rather
+than something one person clicked. The two UIs therefore answer different
+questions and are not meant to converge: Grafana shows the raw lines (including
+the unstructured ones the audit trail deliberately ignores) and counts them from
+Loki; `/dashboard` shows what was *decided*, from PostgreSQL, with the trace join.
 
 **Cost.** Hand-written SVG and DOM code, and no alerting. Alerting is the
 obvious next step and would be built on `/metrics` plus the read API.

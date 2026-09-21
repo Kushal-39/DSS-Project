@@ -8,7 +8,8 @@ part that had to be built; these are wiring.
 | --- | --- | --- |
 | `loki/loki-config.yml` | Grafana Loki | Central log store. Receives every container's stdout. |
 | `promtail/promtail-config.yml` | Grafana Promtail | Ships container stdout to Loki (Docker service discovery). |
-| `grafana/provisioning/…` | Grafana | Datasource provisioning so Loki is queryable on first boot. |
+| `grafana/provisioning/datasources/loki.yml` | Grafana | Datasource provisioning so Loki is queryable on first boot. |
+| `grafana/provisioning/dashboards/` | Grafana | The log dashboards, as code: `dashboards.yml` is the provider and `dashboards/json/zt-logs.json` is the dashboard itself. |
 
 ## Two paths, on purpose
 
@@ -40,6 +41,50 @@ environment (see `docker-compose.yml`): the telemetry service receives OTLP
 spans, stores the copy the trace join needs, and mirrors the export onward to
 Jaeger so spans remain browsable visually.
 
+## The log dashboard is committed, not clicked together
+
+Grafana's dashboard is provisioned from
+`grafana/provisioning/dashboards/json/zt-logs.json`, so "deploy centralized log
+ingestion" means every machine gets the same views, and a change to them is a
+reviewable diff. It answers, from the logs:
+
+| Panel | Question |
+| --- | --- |
+| Log lines, Errors, Warnings, Security decisions in the logs | How much is happening, and how much of it is going wrong, right now? |
+| Log volume by service / Errors and warnings by service | Which component is talking, which has gone quiet, and where the spikes are. |
+| Blocked and refused, as the components logged them | Refused logins (`outcome=denied`) and rejected requests (4xx/5xx), from the producers' own words. |
+| Refused and rejected — log lines, Live logs | The raw lines behind the counts, with the `TraceID` link that opens the flow in Jaeger. |
+
+Two deliberate limits. It is **not** the audit UI: permits, denials and trace
+joins are counted in PostgreSQL by the telemetry service and rendered at
+`/dashboard`, because a log store is not an audit trail (see the section below).
+And the counting panels use `or vector(0)`, so a quiet window reads `0` rather
+than "No data" — "nothing happened" and "the query is broken" must not look the
+same.
+
+The separate `service` variable filters every panel at once; `All` is the
+default because the first question about a distributed system is usually
+"what is everyone doing", not "what is the IdP doing".
+
+## Retention, and why the two stores differ
+
+| Store | Kept for | Enforced by |
+| --- | --- | --- |
+| Loki (everything every container printed) | 7 days (`retention_period: 168h`) | Loki's compactor, which must be enabled for the retention to mean anything |
+| PostgreSQL audit trail (decisions only) | 30 days by default (`TELEMETRY_RETENTION`) | the telemetry service's own purge on an interval (`TELEMETRY_RETENTION_INTERVAL`) |
+
+A debug log and a security record have different lifetimes, and the shorter one
+belongs to the log store. Both are bounded: an unbounded log store is a disk
+incident, and an unbounded audit trail is a liability.
+
+Loki's retention is silent by design (the compactor deletes chunks), so the
+evidence that it is on is the configuration plus `retention_enabled: true` on the
+compactor — without that second setting, `retention_period` does nothing. The
+audit trail's purge is the opposite: each sweep that removes something logs
+`purge_complete` with `removed_events` and `removed_spans` reported separately,
+because "the audit trail shrank" and "which half of it shrank" are different
+questions.
+
 ## Ports
 
 | Service | Port | URL |
@@ -49,6 +94,7 @@ Jaeger so spans remain browsable visually.
 | Loki API | 3100 | http://localhost:3100/ready |
 | Grafana | 3300 | http://localhost:3300 |
 
+Grafana's dashboard is at http://localhost:3300/d/zt-logs (folder *Zero-Trust*).
 Grafana's anonymous admin access is enabled for local development only
 (`GF_AUTH_ANONYMOUS_ENABLED`) — it is a convenience for a reviewer, not a
 production setting, and the compose file says so where it is set.

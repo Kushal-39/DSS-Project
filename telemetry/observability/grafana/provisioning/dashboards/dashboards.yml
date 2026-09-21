@@ -1,0 +1,35 @@
+# Grafana dashboard provisioning (Grafana as code).
+#
+# Grafana exists in this stack for one job: reading the centralized log store
+# (Loki). A dashboard that has to be built by hand is not a delivered piece of
+# work — it is a screenshot someone took once — so the log views live here as
+# files, are reviewed like any other change, and are identical on every machine.
+#
+# The JSON under json/ is read from inside the container. The compose service
+# mounts ./telemetry/observability/grafana/provisioning at
+# /etc/grafana/provisioning, so the path below is that mount plus dashboards/json
+# — no second volume, and nothing to configure in the Grafana UI.
+#
+# The audit views (decisions, denials, traces) are NOT here on purpose: they are
+# served by the telemetry service itself at /dashboard, where the data is in
+# PostgreSQL rather than in the log store. See telemetry/README.md §6 and
+# docs/decisions.md §6 for why the two are separate.
+
+apiVersion: 1
+
+providers:
+  - name: zero-trust-logs
+    orgId: 1
+    # A folder keeps the provisioned dashboards apart from anything someone
+    # saves by hand while exploring.
+    folder: Zero-Trust
+    folderUid: zero-trust
+    type: file
+    # Edits in the UI are not persisted: the file is the source of truth, so a
+    # change made in a browser would silently disappear on the next restart.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    disableDeletion: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false
