@@ -63,22 +63,26 @@ To avoid integration bottlenecks during development, everyone must strictly adhe
 2. **Transport Contract:** Internal service-to-service communication uses TLS 1.3 with mutual certificate verification (mTLS) using a shared local self-signed Certificate Authority (CA).
 
 
-3. **Policy Request Contract:** Every microservice queries the Policy Engine via `POST /v1/data/authz/allow` with this standard payload structure:
+3. **Policy Request Contract:** Every microservice queries the Policy Engine via `POST http://policy-engine:8181/v1/data/authz/allow` with this standard payload structure (canonical format defined in `docs/policymaker.md` — copy it exactly):
 
 
 ```json
 {
   "input": {
-    "subject": "user123",
-    "roles": ["customer"],
+    "subject": {
+      "user_id": "uuid-string-from-jwt",
+      "roles": ["customer"]
+    },
     "action": "TRANSFER",
     "resource": "account_987",
     "context": {
-      "ip": "192.168.1.50",
-      "amount": 5000
+      "amount": 50.00,
+      "ip_address": "192.168.1.50",
+      "mTLS_verified": true
     }
   }
 }
-
 ```
+
+> **WARNING: The Policy Engine strictly enforces a nested payload wrapped in an `input` object. Sending a flat payload will trigger an immediate default-deny (403 Forbidden) and drop the request. There are no exceptions.**
 

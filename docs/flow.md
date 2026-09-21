@@ -19,9 +19,9 @@ This document details the step-by-step lifecycle of an execution request through
 
 4. **Policy Enforcement Check (Person 4/5 -> Person 3)**
    - Microservice intercepts the request and extracts JWT claims + request body details.
-   - Microservice issues a synchronous `POST` request to the Policy Engine (`/v1/data/authz/allow`).
-   - Policy Engine evaluates Attribute-Based Access Control (ABAC) rules and returns `{"allow": true}` or `{"allow": false}`.
-   - If `false`, Microservice immediately aborts and returns `403 Forbidden`.
+   - Microservice issues a synchronous `POST` request to the Policy Engine (`http://policy-engine:8181/v1/data/authz/allow`) with the payload wrapped in an `"input"` object per `docs/policymaker.md` (`subject` nested as an object with `user_id` and `roles`, plus `action`, `resource`, and `context` including `mTLS_verified`).
+   - Policy Engine evaluates Attribute-Based Access Control (ABAC) rules and returns `{"result": {"allow": true}}` or `{"result": {"allow": false}}`.
+   - If `result.allow` is anything other than `true`, Microservice immediately aborts and returns `403 Forbidden`.
 
 5. **Inter-Service Execution (Person 4 -> Person 5)**
    - If Microservice A needs to invoke Microservice B (e.g., Account Service triggering Payment Service):
