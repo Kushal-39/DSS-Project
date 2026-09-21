@@ -1,0 +1,67 @@
+# Loki configuration — single-binary, filesystem-backed, for local development.
+#
+# Scope: this is the human-facing log store. Every container in this Compose
+# project has its stdout captured here, so a request can be read end to end in
+# Loki/Grafana (including the unstructured lines that carry no security signal).
+# The audit trail with its decisions lives in the telemetry service's own
+# tables — see telemetry/README.md for why the two are deliberately separate,
+# and promtail-config.yml for how the container scope is enforced.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-04-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/index_cache
+
+limits_config:
+  # Local development logs may be replayed from a file whose timestamps are
+  # older than the default rejection window; refusing them would silently drop
+  # exactly the backlog a reviewer is trying to inspect.
+  reject_old_samples: false
+  allow_structured_metadata: true
+  # Keep a week of container logs. The audit trail's own retention is set
+  # separately with TELEMETRY_RETENTION, because a security record and a debug
+  # log have different lifetimes.
+  retention_period: 168h
+  # Label cardinality guard: a container name or compose service is a label;
+  # a request path or a user id is not.
+  max_label_names_per_series: 30
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  # Retention is off unless the compactor enforces it, so this pair is what
+  # actually makes retention_period above mean anything.
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

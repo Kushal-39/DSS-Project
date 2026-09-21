@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero-Trust Audit Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2230;
+    --line: #2b3340;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --permit: #3fb950;
+    --deny: #f85149;
+    --error: #d29922;
+    --info: #58a6ff;
+    --accent: #7c8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    background: rgba(13,17,23,.92); backdrop-filter: blur(6px);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button {
+    background: transparent; color: var(--muted); border: 0; padding: 5px 10px;
+    font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.active { background: var(--panel-2); color: var(--text); }
+  .seg button:hover { color: var(--text); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.live { background: var(--permit); box-shadow: 0 0 6px var(--permit); }
+  .dot.stale { background: var(--deny); }
+  main { padding: 20px; display: grid; gap: 16px; max-width: 1500px; margin: 0 auto; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  }
+  .tile .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tile .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .tile.alarm .value { color: var(--deny); }
+  .tile.warn .value { color: var(--error); }
+  .tile.ok .value { color: var(--permit); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+    min-width: 0;
+  }
+  .panel h2 { margin: 0 0 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); }
+  .rows { display: grid; gap: 7px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
+  .row .key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .count { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bar { grid-column: 1 / -1; height: 4px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .empty { color: var(--muted); font-size: 13px; font-style: italic; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 8px; border-bottom: 1px solid rgba(43,51,64,.5); vertical-align: top; }
+  tr:hover td { background: rgba(124,140,255,.05); }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .3px; }
+  .pill.DENY { background: rgba(248,81,73,.15); color: var(--deny); }
+  .pill.PERMIT { background: rgba(63,185,80,.15); color: var(--permit); }
+  .pill.ERROR { background: rgba(210,153,34,.15); color: var(--error); }
+  .pill.INFO { background: rgba(88,166,255,.15); color: var(--info); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .trace-form { display: flex; gap: 8px; margin-bottom: 12px; }
+  .trace-form input {
+    flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 10px; font: inherit; font-size: 12.5px;
+  }
+  .trace-form button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 14px; font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .trace-form button:hover { border-color: var(--accent); }
+  .trace-summary { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+  .trace-summary b { color: var(--text); font-weight: 600; }
+  .span-row { padding: 5px 0 5px 0; border-left: 2px solid var(--line); position: relative; }
+  .span-row .name { font-weight: 500; }
+  .span-row .meta { color: var(--muted); font-size: 11.5px; }
+  .timeline svg { width: 100%; height: 150px; display: block; }
+  .legend { display: flex; gap: 14px; color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+  .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+  footer { color: var(--muted); font-size: 11.5px; padding: 0 20px 30px; max-width: 1500px; margin: 0 auto; }
+  .link { cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Zero-Trust Audit Dashboard <span>· telemetry / Person 6</span></h1>
+  <div class="controls">
+    <div class="seg" id="window">
+      <button data-window="5m">5m</button>
+      <button data-window="15m">15m</button>
+      <button data-window="1h">1h</button>
+      <button data-window="6h">6h</button>
+      <button data-window="24h" class="active">24h</button>
+      <button data-window="168h">7d</button>
+    </div>
+    <div class="seg" id="refresh">
+      <button data-refresh="0">paused</button>
+      <button data-refresh="5" class="active">5s</button>
+      <button data-refresh="15">15s</button>
+      <button data-refresh="60">60s</button>
+    </div>
+    <span class="dot" id="status" title="pipeline status"></span>
+    <span id="updated" style="color:var(--muted);font-size:12px"></span>
+  </div>
+</header>
+
+<main>
+  <section class="tiles" id="tiles"></section>
+
+  <section class="panel">
+    <h2>Decision activity</h2>
+    <div class="timeline" id="timeline"><div class="empty">loading…</div></div>
+    <div class="legend">
+      <span><i style="background:var(--permit)"></i>permit</span>
+      <span><i style="background:var(--deny)"></i>denied</span>
+      <span><i style="background:var(--error)"></i>error</span>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="panel"><h2>Blocked — by reason</h2><div class="rows" id="by-reason"></div></section>
+    <section class="panel"><h2>Events by service</h2><div class="rows" id="by-service"></div></section>
+    <section class="panel"><h2>By category</h2><div class="rows" id="by-category"></div></section>
+    <section class="panel"><h2>Denied subjects</h2><div class="rows" id="top-subjects"></div></section>
+    <section class="panel"><h2>Denied clients</h2><div class="rows" id="top-clients"></div></section>
+  </div>
+
+  <section class="panel">
+    <h2>Latest blocked requests</h2>
+    <div style="overflow-x:auto">
+      <table id="denials">
+        <thead><tr>
+          <th>time</th><th>service</th><th>kind</th><th>reason</th>
+          <th>subject</th><th>request</th><th>client</th><th>trace</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty" id="denials-empty" hidden>No blocked requests in this window — nothing denied yet.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Trace explorer — one flow across all components</h2>
+    <form class="trace-form" id="trace-form">
+      <input id="trace-input" placeholder="W3C trace id (32 hex chars, from a traceparent header)" spellcheck="false" autocomplete="off">
+      <button type="submit">Inspect</button>
+    </form>
+    <div id="trace-result"><div class="empty">Paste a trace id to join the spans and audit decisions of a single request.</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Live audit feed</h2>
+    <div style="overflow-x:auto">
+      <table id="feed">
+        <thead><tr>
+          <th>time</th><th>decision</th><th>service</th><th>kind</th><th>reason</th>
+          <th>subject</th><th>request</th><th>status</th><th>trace</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty" id="feed-empty" hidden>Nothing ingested yet. Start a component and its decisions will appear here.</div>
+  </section>
+</main>
+
+<footer>
+  Reads <code>/v1/audit/summary</code> and <code>/v1/audit/events</code>;
+  the trace explorer joins <code>/v1/audit/traces/{traceID}</code>.
+  Ingest is authenticated with <code>TELEMETRY_INGEST_TOKEN</code>.
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  // --- read token handling -------------------------------------------------
+  // If /dashboard?token=… is opened (the TELEMETRY_READ_TOKEN case), keep the
+  // token in sessionStorage and strip it from the address bar so it does not
+  // linger in browser history or get shared when the URL is copied.
+  var params = new URLSearchParams(location.search);
+  if (params.get("token")) {
+    sessionStorage.setItem("telemetry_read_token", params.get("token"));
+    params.delete("token");
+    var cleaned = location.pathname + (params.toString() ? "?" + params.toString() : "");
+    history.replaceState(null, "", cleaned);
+  }
+  var readToken = sessionStorage.getItem("telemetry_read_token") || "";
+
+  var state = { window: "24h", refresh: 5, timer: null, feedOnlyDenials: false };
+
+  function headers() {
+    var h = { "Accept": "application/json" };
+    if (readToken) h["X-Telemetry-Token"] = readToken;
+    return h;
+  }
+
+  function getJSON(url) {
+    return fetch(url, { headers: headers() }).then(function (res) {
+      if (res.status === 401) throw new Error("unauthorized — reopen with /dashboard?token=<TELEMETRY_READ_TOKEN>");
+      if (!res.ok) return res.json().then(function (body) {
+        throw new Error(body.message || ("HTTP " + res.status));
+      });
+      return res.json();
+    });
+  }
+
+  function esc(value) {
+    return String(value === undefined || value === null ? "" : value).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function num(value) {
+    return (value || 0).toLocaleString("en-US");
+  }
+
+  function clock(value) {
+    if (!value) return "—";
+    var d = new Date(value);
+    return d.toLocaleTimeString("en-GB", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+
+  function shortTrace(id) {
+    return id ? id.slice(0, 12) + "…" : "—";
+  }
+
+  // --- rendering -----------------------------------------------------------
+
+  function renderTiles(s) {
+    var evaluated = (s.permits || 0) + (s.denials || 0) + (s.errors || 0);
+    var tiles = [
+      { label: "decisions", value: num(evaluated), sub: num(s.total) + " events total", cls: "" },
+      { label: "blocked requests", value: num(s.denials), sub: "deny verdicts", cls: s.denials ? "alarm" : "" },
+      { label: "unauthorized attempts", value: num(s.unauthorized_attempts), sub: "auth / policy rejects", cls: s.unauthorized_attempts ? "alarm" : "" },
+      { label: "rate limited", value: num(s.rate_limited), sub: "shed at the perimeter", cls: s.rate_limited ? "warn" : "" },
+      { label: "errors", value: num(s.errors), sub: "operational failures", cls: s.errors ? "warn" : "" },
+      { label: "denial rate", value: (evaluated ? ((s.denial_rate || 0) * 100).toFixed(1) : "0.0") + "%", sub: "of all decisions", cls: "" },
+      { label: "services reporting", value: num(s.active_services), sub: num(s.by_service ? s.by_service.length : 0) + " distinct", cls: "ok" },
+      { label: "traces seen", value: num(s.trace_count), sub: num(s.span_count) + " spans stored", cls: "" }
+    ];
+    document.getElementById("tiles").innerHTML = tiles.map(function (t) {
+      return '<div class="tile ' + t.cls + '">' +
+        '<div class="label">' + esc(t.label) + "</div>" +
+        '<div class="value">' + esc(t.value) + "</div>" +
+        '<div class="sub">' + esc(t.sub) + "</div></div>";
+    }).join("");
+  }
+
+  function renderRows(id, counts, colour) {
+    var el = document.getElementById(id);
+    if (!counts || !counts.length) {
+      el.innerHTML = '<div class="empty">nothing in this window</div>';
+      return;
+    }
+    var max = counts.reduce(function (m, c) { return Math.max(m, c.count); }, 1);
+    el.innerHTML = counts.map(function (c) {
+      var width = Math.max(2, Math.round((c.count / max) * 100));
+      var colourStyle = colour ? ' style="background:' + colour(c.key) + '"' : "";
+      return '<div class="row">' +
+        '<span class="key mono" title="' + esc(c.key) + '">' + esc(c.key || "(none)") + "</span>" +
+        '<span class="count">' + num(c.count) + "</span>" +
+        '<span class="bar"><i' + colourStyle + ' style="width:' + width + '%"></i></span>' +
+        "</div>";
+    }).join("");
+  }
+
+  function renderTimeline(buckets) {
+    var el = document.getElementById("timeline");
+    if (!buckets || !buckets.length) {
+      el.innerHTML = '<div class="empty">no activity in this window</div>';
+      return;
+    }
+    var peak = buckets.reduce(function (m, b) { return Math.max(m, b.total); }, 0) || 1;
+    var n = buckets.length;
+    var barWidth = 100 / n;
+    var series = [
+      { key: "permit", colour: "var(--permit)" },
+      { key: "deny", colour: "var(--deny)" },
+      { key: "error", colour: "var(--error)" }
+    ];
+    var bars = [];
+    buckets.forEach(function (b, i) {
+      var x = (i * barWidth).toFixed(4);
+      var offset = 0;
+      series.forEach(function (s) {
+        var value = b[s.key] || 0;
+        if (!value) return;
+        var h = (value / peak) * 100;
+        var y = 100 - offset - h;
+        offset += h;
+        bars.push('<rect x="' + x + '%" y="' + y.toFixed(3) + '%" width="' + (barWidth * 0.86).toFixed(4) +
+          '%" height="' + h.toFixed(3) + '%" fill="' + s.colour + '" rx="1"><title>' +
+          esc(clock(b.start)) + " — " + esc(b.total) + " events (" + esc(b.permit || 0) + " permit, " +
+          esc(b.deny || 0) + " deny, " + esc(b.error || 0) + " error)</title></rect>");
+      });
+    });
+    el.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="decision activity timeline">' +
+      '<line x1="0" y1="100" x2="100" y2="100" stroke="var(--line)" stroke-width="0.4"></line>' +
+      bars.join("") + "</svg>" +
+      '<div class="legend" style="justify-content:space-between">' +
+      "<span>" + esc(clock(buckets[0].start)) + "</span>" +
+      "<span>" + esc(clock(buckets[buckets.length - 1].start)) + "</span>" +
+      "</div>";
+  }
+
+  function eventRow(e, withDecision) {
+    var trace = e.trace_id
+      ? '<a class="mono link" onclick="window.__inspectTrace(\'' + esc(e.trace_id) + "');return false\" title=\"" + esc(e.trace_id) + '">' + esc(shortTrace(e.trace_id)) + "</a>"
+      : "—";
+    var request = e.path ? (e.method ? e.method + " " + e.path : e.path) : (e.message || e.event_type || "—");
+    return "<tr>" +
+      "<td class=\"mono\">" + esc(clock(e.occurred_at)) + "</td>" +
+      (withDecision ? '<td><span class="pill ' + esc(e.decision) + '">' + esc(e.decision) + "</span></td>" : "") +
+      "<td>" + esc(e.service) + "</td>" +
+      '<td class="mono">' + esc(e.category) + "</td>" +
+      "<td>" + esc(e.reason || "—") + "</td>" +
+      "<td>" + esc(e.subject || "—") + "</td>" +
+      '<td class="mono" title="' + esc(request) + '">' + esc(request) + "</td>" +
+      (withDecision ? "<td>" + esc(e.status || "—") + "</td>" : "") +
+      "<td>" + trace + "</td>" +
+      "</tr>";
+  }
+
+  function renderFeed(events) {
+    var body = document.querySelector("#feed tbody");
+    var empty = document.getElementById("feed-empty");
+    if (!events || !events.length) {
+      body.innerHTML = "";
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = events.map(function (e) { return eventRow(e, true); }).join("");
+  }
+
+  function renderDenials(events) {
+    var body = document.querySelector("#denials tbody");
+    var empty = document.getElementById("denials-empty");
+    if (!events || !events.length) {
+      body.innerHTML = "";
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = events.map(function (e) { return eventRow(e, false); }).join("");
+  }
+
+  var categoryColour = {
+    AUTH: "var(--info)", AUTHZ: "var(--accent)", ACCESS: "var(--muted)",
+    RATE_LIMIT: "var(--error)", ERROR: "var(--deny)", LOG: "var(--muted)"
+  };
+
+  function renderTrace(payload) {
+    var el = document.getElementById("trace-result");
+    var t = payload.trace;
+    var summary = '<div class="trace-summary">' +
+      "<span><b>" + esc(t.span_count) + "</b> spans</span>" +
+      "<span><b>" + esc(t.event_count) + "</b> audit events</span>" +
+      "<span><b>" + esc(t.services.length) + "</b> services</span>" +
+      "<span><b>" + esc(t.duration_ms) + " ms</b> end to end</span>" +
+      "<span><b>" + esc(t.denied) + "</b> denials</span>" +
+      "<span>started <b>" + esc(clock(t.started_at)) + "</b></span>" +
+      "</div>";
+
+    var services = '<div class="rows" style="margin-bottom:12px">' + t.services.map(function (s) {
+      return '<div class="row"><span class="key">' + esc(s) + "</span></div>";
+    }).join("") + "</div>";
+
+    var spans = t.spans.length ? t.spans.map(function (s) {
+      return '<div class="span-row" style="padding-left:10px">' +
+        '<div class="name">' + esc(s.name) + "</div>" +
+        '<div class="meta">' + esc(s.service) + " · " + esc(s.duration_ns / 1e6).slice(0, 6) + " ms · " +
+        esc(s.status || "unset") + " · span " + esc(s.span_id.slice(0, 8)) +
+        (s.parent_span_id ? " ← " + esc(s.parent_span_id.slice(0, 8)) : " (root)") +
+        "</div></div>";
+    }).join("") : '<div class="empty">no spans stored for this trace</div>';
+
+    var events = t.events.length
+      ? '<table><thead><tr><th>time</th><th>decision</th><th>service</th><th>kind</th><th>reason</th><th>subject</th><th>message</th></tr></thead><tbody>' +
+        t.events.map(function (e) {
+          return "<tr>" +
+            '<td class="mono">' + esc(clock(e.occurred_at)) + "</td>" +
+            '<td><span class="pill ' + esc(e.decision) + '">' + esc(e.decision) + "</span></td>" +
+            "<td>" + esc(e.service) + "</td>" +
+            '<td class="mono">' + esc(e.category) + "</td>" +
+            "<td>" + esc(e.reason || "—") + "</td>" +
+            "<td>" + esc(e.subject || "—") + "</td>" +
+            "<td>" + esc(e.message || "—") + "</td>" +
+            "</tr>";
+        }).join("") + "</tbody></table>"
+      : '<div class="empty">no audit decisions recorded inside this trace</div>';
+
+    el.innerHTML = summary + services + spans +
+      '<h2 style="margin-top:16px">Audit decisions in this flow</h2>' + events;
+  }
+
+  // --- loading -------------------------------------------------------------
+
+  function load() {
+    var status = document.getElementById("status");
+    var summaryURL = "/v1/audit/summary?window=" + encodeURIComponent(state.window);
+    var denialsURL = "/v1/audit/events?decision=DENY&limit=25&window=" + encodeURIComponent(state.window);
+    var feedURL = "/v1/audit/events?limit=50&window=" + encodeURIComponent(state.window);
+
+    Promise.all([getJSON(summaryURL), getJSON(denialsURL), getJSON(feedURL)])
+      .then(function (results) {
+        var s = results[0].summary;
+        renderTiles(s);
+        renderTimeline(s.timeline);
+        renderRows("by-reason", s.by_reason, function () { return "var(--deny)"; });
+        renderRows("by-service", s.by_service, null);
+        renderRows("by-category", s.by_category, function (k) { return categoryColour[k] || "var(--accent)"; });
+        renderRows("top-subjects", s.top_subjects, function () { return "var(--error)"; });
+        renderRows("top-clients", s.top_clients, function () { return "var(--error)"; });
+        // The summary carries the authoritative denial list (it is part of the
+        // same aggregate); fall back to the filtered query when it is empty.
+        renderDenials(s.latest_denials && s.latest_denials.length ? s.latest_denials : results[1].events);
+        renderFeed(results[2].events);
+
+        status.className = "dot live";
+        status.title = "last refresh " + clock(results[0].generated_at);
+        document.getElementById("updated").textContent = "updated " + clock(results[0].generated_at);
+      })
+      .catch(function (err) {
+        status.className = "dot stale";
+        status.title = err.message;
+        document.getElementById("updated").textContent = err.message;
+      });
+  }
+
+  window.__inspectTrace = function (traceID) {
+    document.getElementById("trace-input").value = traceID;
+    inspect(traceID);
+  };
+
+  function inspect(traceID) {
+    var el = document.getElementById("trace-result");
+    el.innerHTML = '<div class="empty">loading trace…</div>';
+    getJSON("/v1/audit/traces/" + encodeURIComponent(traceID))
+      .then(renderTrace)
+      .catch(function (err) { el.innerHTML = '<div class="empty">' + esc(err.message) + "</div>"; });
+  }
+
+  document.getElementById("trace-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var value = document.getElementById("trace-input").value.trim().toLowerCase();
+    if (value) inspect(value);
+  });
+
+  function schedule() {
+    if (state.timer) clearInterval(state.timer);
+    state.timer = null;
+    if (state.refresh > 0) state.timer = setInterval(load, state.refresh * 1000);
+  }
+
+  document.getElementById("window").addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (!button) return;
+    state.window = button.dataset.window;
+    Array.prototype.forEach.call(this.children, function (b) { b.classList.toggle("active", b === button); });
+    load();
+  });
+
+  document.getElementById("refresh").addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (!button) return;
+    state.refresh = parseInt(button.dataset.refresh, 10) || 0;
+    Array.prototype.forEach.call(this.children, function (b) { b.classList.toggle("active", b === button); });
+    schedule();
+  });
+
+  load();
+  schedule();
+})();
+</script>
+</body>
+</html>

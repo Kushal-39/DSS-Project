@@ -1,0 +1,13 @@
+# Keep the build context to source only: no local binaries, no editor spill,
+# no secrets. The Dockerfile copies the module and builds inside the image.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+build/
+bin/
+**/*.test
+telemetry
+shipper

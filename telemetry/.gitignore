@@ -1,0 +1,13 @@
+# Local build artifacts. The repo-level .gitignore already covers *.key and
+# *.pem; this keeps path-scoped artifacts out of the telemetry folder.
+/telemetry
+/shipper
+/bin/
+/build/
+coverage.out
+*.test
+
+# Local overrides for running the collector outside Compose. Real secrets live
+# in the git-crypt-encrypted root .env and must never appear here.
+.env
+.env.local

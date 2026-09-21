@@ -61,6 +61,160 @@ services:
       retries: 3
       start_period: 15s
 
+  #############################################################################
+  # Person 6: Observability, Distributed Tracing & Centralized Logging.
+  # The audit ingest/read API, the OTLP span receiver and the dashboard.
+  #############################################################################
+  telemetry:
+    build: ./telemetry
+    ports:
+      - "8088:8088"
+    environment:
+      # Same shared instance as the IdP, but telemetry owns the audit_events
+      # and spans tables exclusively (docs/database.md section 2).
+      DATABASE_URL: ${DATABASE_URL}
+      # postgres (durable, default) or memory (volatile, demo only).
+      TELEMETRY_STORE: ${TELEMETRY_STORE:-postgres}
+      # Authenticates collectors, so nobody who reaches the port can forge
+      # the security record.
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
+      TELEMETRY_READ_TOKEN: ${TELEMETRY_READ_TOKEN:-}
+      # Mirror received spans to Jaeger so they stay visually browsable.
+      TELEMETRY_FORWARD_OTLP_ENDPOINT: ${TELEMETRY_FORWARD_OTLP_ENDPOINT:-http://jaeger:4318}
+      TELEMETRY_RETENTION: ${TELEMETRY_RETENTION:-720h}
+      TELEMETRY_DASHBOARD_WINDOW: ${TELEMETRY_DASHBOARD_WINDOW:-24h}
+      TELEMETRY_LOG_LEVEL: ${TELEMETRY_LOG_LEVEL:-info}
+    healthcheck:
+      # /readyz pings the audit store, so "healthy" means "can it actually
+      # record decisions?" -- which is what the log collector gates on.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8088/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Central audit logging consumer: follows every container's stdout in this
+  # Compose project and forwards the structured records to the ingest API, so
+  # a component becomes auditable by existing rather than by adding a library.
+  telemetry-collector:
+    build: ./telemetry
+    entrypoint: ["/app/shipper"]
+    restart: unless-stopped
+    environment:
+      TELEMETRY_URL: http://telemetry:8088
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
+      # Empty means "whichever Compose project the collector itself runs in".
+      TELEMETRY_SHIP_PROJECT: ${TELEMETRY_SHIP_PROJECT:-}
+      TELEMETRY_SHIP_CONTAINERS: ${TELEMETRY_SHIP_CONTAINERS:-}
+      # Default excludes the telemetry service itself: shipping the pipeline's
+      # own ingest log would feed the collector lines that generate more lines.
+      TELEMETRY_SHIP_EXCLUDE: ${TELEMETRY_SHIP_EXCLUDE:-telemetry}
+      DOCKER_SOCKET: /var/run/docker.sock
+      # The collector's own health, readiness and metrics listener.
+      TELEMETRY_SHIP_ADDR: ${TELEMETRY_SHIP_ADDR:-:8089}
+      # How much history to read from a container the first time it is followed.
+      # "0s" reads everything the container still holds.
+      TELEMETRY_SHIP_BACKFILL: ${TELEMETRY_SHIP_BACKFILL:-30m}
+      TELEMETRY_LOG_LEVEL: ${TELEMETRY_LOG_LEVEL:-info}
+    ports:
+      - "${TELEMETRY_SHIP_PORT:-8089}:8089"
+    group_add:
+      # The collector runs as a non-root user and reads the Docker API socket
+      # through the host's docker group. Find the value with:
+      #   stat -c '%g' /var/run/docker.sock
+      - "${TELEMETRY_DOCKER_GID:-960}"
+    volumes:
+      # Read-only: the collector inspects containers and follows their logs.
+      # It never starts, stops or modifies anything.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # The image's inherited HEALTHCHECK probes the telemetry HTTP API, which
+    # this service does not serve. It has its own: /readyz reports whether the
+    # Docker API is actually reachable, so "unhealthy" means "running but
+    # collecting nothing", which is the failure worth being told about.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8089/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # On an SELinux host the socket carries the container_var_run_t label, and
+    # container_t is denied write on it even as root, so no group or mode fix
+    # can help. Relaxing the label for this one container is the contained
+    # option (the alternative, `:z`, relabels the socket on the host).
+    # Production should front the socket with a read-only proxy instead; this
+    # collector only ever calls GET on the container and log endpoints.
+    security_opt:
+      - label=disable
+    depends_on:
+      telemetry:
+        condition: service_healthy
+
+  # Distributed tracing UI. The telemetry service receives OTLP on the internal
+  # network and mirrors the export here, so spans exist once for the audit
+  # trace-join and once for visual browsing.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: memory
+      LOG_LEVEL: warn
+    restart: unless-stopped
+
+  # Central log store. Everything a container prints lands here, including the
+  # unstructured lines the audit trail deliberately ignores.
+  loki:
+    image: grafana/loki:3.1.1
+    command: -config.file=/etc/loki/loki-config.yml
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./telemetry/observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  # Ships every container's stdout to Loki using Docker service discovery.
+  # This is the "everything" log path; telemetry-collector is the "decisions
+  # only" path. Both read the same stdout, so neither can hide a line.
+  promtail:
+    image: grafana/promtail:3.1.1
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./telemetry/observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    # Same SELinux constraint as the audit collector above: the socket and the
+    # log files under /var/lib/docker are only reachable with the container
+    # label check relaxed.
+    security_opt:
+      - label=disable
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      # 3300, not Grafana's usual 3000: this stack must come up on a developer
+      # machine that is already running something else on 3000. Override with
+      # GRAFANA_PORT.
+      - "${GRAFANA_PORT:-3300}:3000"
+    environment:
+      # Anonymous admin is a LOCAL DEVELOPMENT convenience so a reviewer can
+      # open Loki without hand-creating an account. Never carry this into a
+      # shared or production environment.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./telemetry/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+    restart: unless-stopped
+
 networks:
   default:
     # The Supabase host resolves only to IPv6 on this deployment (no A
@@ -69,3 +223,9 @@ networks:
     # resolution with no IPv6 route otherwise fails hard with "network is
     # unreachable" and Go never falls back.
     enable_ipv6: true
+
+volumes:
+  # Loki's chunk/index store and Grafana's state. Named volumes so
+  # `docker compose down` does not throw away the logs a reviewer is reading.
+  loki-data:
+  grafana-data:
