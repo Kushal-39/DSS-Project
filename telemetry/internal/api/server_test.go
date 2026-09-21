@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -412,6 +413,74 @@ func TestEventsFilterAndPaginate(t *testing.T) {
 		response, _ := do(t, server, http.MethodGet, "/v1/audit/events?"+bad, "", nil)
 		if response.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", bad, response.StatusCode)
+		}
+	}
+}
+
+// An explicit since/until window is how anyone asks a question about a period
+// that is not the dashboard's default. It is also the one place a caller's
+// input reaches a time value, so a malformed value has to be refused with a
+// message that says what was wrong rather than silently ignored — a filter that
+// is quietly dropped answers a different question than the one that was asked.
+func TestEventsHonourAnExplicitSinceUntilWindow(t *testing.T) {
+	auditStore := store.NewMemory()
+	server := newTestServer(t, nil, auditStore, nil)
+
+	// One event well before the default 24 hour window, one inside it.
+	seed(t, auditStore, "idp", audit.CategoryAuth, audit.DecisionDeny, "invalid_credentials", "old",
+		clock.Add(-72*time.Hour), "")
+	seed(t, auditStore, "idp", audit.CategoryAccess, audit.DecisionPermit, "ok", "recent",
+		clock.Add(-time.Minute), "")
+
+	type envelope struct {
+		Count  int           `json:"count"`
+		Events []audit.Event `json:"events"`
+	}
+	count := func(t *testing.T, path string) (int, int) {
+		t.Helper()
+		response, payload := do(t, server, http.MethodGet, path, "", nil)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d (%s)", path, response.StatusCode, payload)
+		}
+		var page envelope
+		if err := json.Unmarshal(payload, &page); err != nil {
+			t.Fatal(err)
+		}
+		return page.Count, len(page.Events)
+	}
+
+	// The default window excludes the three-day-old decision...
+	if got, _ := count(t, "/v1/audit/events"); got != 1 {
+		t.Errorf("default window count = %d, want 1: an old event is outside the dashboard window", got)
+	}
+	// ...and an explicit window wide enough brings it back.
+	if got, _ := count(t, "/v1/audit/events?since="+clock.Add(-96*time.Hour).Format(time.RFC3339)); got != 2 {
+		t.Errorf("wide window count = %d, want 2", got)
+	}
+	// Both spellings of the same instant are accepted: RFC3339 and unix seconds.
+	since := strconv.FormatInt(clock.Add(-96*time.Hour).Unix(), 10)
+	if got, _ := count(t, "/v1/audit/events?since="+since); got != 2 {
+		t.Errorf("unix since count = %d, want 2", got)
+	}
+	until := clock.Add(-48 * time.Hour).Format(time.RFC3339)
+	if got, _ := count(t, "/v1/audit/events?since="+since+"&until="+until); got != 1 {
+		t.Errorf("closed window count = %d, want only the older event", got)
+	}
+
+	// A window that excludes everything is an empty page, not an error.
+	if got, events := count(t, "/v1/audit/events?since="+clock.Add(time.Hour).Format(time.RFC3339)); got != 0 || events != 0 {
+		t.Errorf("future window = %d/%d, want an empty page", got, events)
+	}
+
+	// Anything that is not a time is refused, and told why.
+	for _, bad := range []string{"since=yesterday", "until=2026-13-45", "since=1e9"} {
+		response, payload := do(t, server, http.MethodGet, "/v1/audit/events?"+bad, "", nil)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", bad, response.StatusCode)
+			continue
+		}
+		if !strings.Contains(string(payload), "RFC3339") {
+			t.Errorf("%s: error = %s, want it to name the accepted formats", bad, payload)
 		}
 	}
 }

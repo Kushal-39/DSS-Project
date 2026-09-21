@@ -170,6 +170,9 @@ func (s *Server) countRead(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// readTokenCookie is the cookie the dashboard exchanges a URL token for.
+const readTokenCookie = "telemetry_read_token"
+
 func (s *Server) requireReadAuth(next http.Handler) http.Handler {
 	if s.cfg.ReadToken == "" {
 		return next
@@ -180,10 +183,37 @@ func (s *Server) requireReadAuth(next http.Handler) http.Handler {
 			// Fall back to a cookie so a human can open /dashboard in a
 			// browser without putting the token in the URL (where it would
 			// land in access logs and referrer headers).
-			if cookie, err := r.Cookie("telemetry_read_token"); err == nil {
+			if cookie, err := r.Cookie(readTokenCookie); err == nil {
 				presented = cookie.Value
 			}
 		}
+
+		// ?token= is the documented way in for a browser (see .env.example). A
+		// correct one is exchanged for the cookie and the request is redirected
+		// to the same URL without the query string, so the token does not stay
+		// in the address bar, the browser history or any Referer header. This
+		// applies only to the human-facing pages: an API caller sends a header,
+		// and a token in a query string is exactly what we are avoiding.
+		if presented == "" && !strings.HasPrefix(r.URL.Path, "/v1/") {
+			if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+				if constantTimeEqual(token, s.cfg.ReadToken) {
+					http.SetCookie(w, &http.Cookie{
+						Name:     readTokenCookie,
+						Value:    token,
+						Path:     "/",
+						HttpOnly: true,
+						SameSite: http.SameSiteStrictMode,
+						Secure:   requestIsTLS(r),
+					})
+					http.Redirect(w, r, strippedTokenURL(r), http.StatusFound)
+					return
+				}
+				s.readRejections.Add(1)
+				http.Error(w, "unauthorized: that token is not the read token", http.StatusUnauthorized)
+				return
+			}
+		}
+
 		if !constantTimeEqual(presented, s.cfg.ReadToken) {
 			s.readRejections.Add(1)
 			if strings.HasPrefix(r.URL.Path, "/v1/") {
@@ -207,6 +237,28 @@ func presentedToken(r *http.Request) string {
 		}
 	}
 	return strings.TrimSpace(r.Header.Get("X-Telemetry-Token"))
+}
+
+// requestIsTLS reports whether the browser reached us over TLS. A terminating
+// proxy is the common case in a deployment, so the forwarded header counts too.
+func requestIsTLS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+// strippedTokenURL is the same request without its token query parameter.
+func strippedTokenURL(r *http.Request) string {
+	query := r.URL.Query()
+	query.Del("token")
+	target := *r.URL
+	target.Scheme, target.Host = "", ""
+	target.RawQuery = query.Encode()
+	if target.Path == "" {
+		target.Path = "/"
+	}
+	return target.String()
 }
 
 func constantTimeEqual(presented, expected string) bool {

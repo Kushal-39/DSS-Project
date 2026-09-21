@@ -218,6 +218,16 @@ shows up as `unhealthy`, as `telemetry_collector_ready 0`, and as
 A failure to bind the port is logged as a warning and is **not** fatal: losing a
 metrics port must never stop the audit trail.
 
+**The counters are chosen so a stall is visible, not just a total.** `queued`
+counts records accepted into the pipeline and is reported next to `shipped`,
+`dropped` and `failed`, so "reading but not delivering" — the ingest API
+refusing everything, a token that no longer matches — shows up as a growing gap
+between two numbers rather than as the same steady `shipped 0` an idle stack
+shows. A queue-full shed is counted separately from a batch that failed, because
+one is audit data lost and the other is audit data not yet delivered. For the
+same reason the collector's readiness reports *why* it is not ready, and
+`queued == shipped` is the invariant to check after the flush interval settles.
+
 **Cost.** One more port, and a readiness definition that has to be kept honest
 (it was written after watching a live run, which is why it reports the container
 count and the discovery age).
@@ -248,6 +258,24 @@ the pipeline should not care *how* a decision arrived:
 * The Policy Engine's ABAC envelope (`{"input":{…}}`) and OPA's decision log
   (`{"result":{…}}`) put the interesting fields one level down. A record that
   cannot be read is a decision that never appears, and the failure is silent.
+* **The nesting is not always an object.** OTLP attributes are flat by
+  definition, so the same envelope arrives as `input.subject.user_id`. Reading
+  only the object form meant a policy decision stored with no subject, no roles
+  and no client address — or, with no verdict field either, dropped and counted
+  as chatter. The envelope is now rebuilt from its dotted form before anything
+  reads it, and only the envelope: `http.request.method` and `rpc.service` are
+  legitimately dotted and are never rewritten. Test:
+  `TestFromMapReadsAFlattenedOTLPEnvelope` proves the nest, the flat and the
+  dotted encodings produce the same decision.
+* **A marshalled record inside `body` is a record, not prose.** An SDK whose
+  producer logs a marshalled object puts the whole thing in `body`; read as
+  text it had no field the classifier could use, so the decision was dropped
+  silently (`TestDecodeLogsReadsARecordMarshalledIntoTheBody`).
+* **Precedence is stated, not accidental.** When a record carries the client
+  address both inside the envelope and as `client.address`, the envelope wins:
+  that is the address the decision was evaluated against, so it is the one the
+  verdict is about. Behind a proxy the two disagree, and recording the proxy
+  would answer "who was denied?" wrongly.
 * A gRPC service reports a gRPC status, not an HTTP one. Without the mapping,
   every call it serves would carry no status the classifier recognises — so
   `PERMISSION_DENIED` is mapped to 403 and becomes a DENY.

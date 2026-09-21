@@ -294,7 +294,10 @@ curl -X POST localhost:8080/login -d '{"username":"admin","password":"admin123"}
 | Policy Engine's ABAC envelope | `{"input":{…"context":{"ip":…}}}` → subject, action, resource and client address all promoted to first-class fields (verified in the database, not just the API) |
 | gRPC decisions | `rpc.service`/`rpc.method`/`grpc.code: PERMISSION_DENIED` → path `/payments.TransactionService/Transfer`, status 403, `ACCESS / DENY / forbidden` |
 | Protobuf exports | `POST /v1/logs` with `application/x-protobuf` → 415 naming `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` |
-| The collector can be observed | its own `/readyz` on 8089 reported `following 6 containers`, `shipped 151`, `dropped 0`, and Docker showed it **healthy** |
+| The collector can be observed | its own `/readyz` on 8089 reported `following 8 containers`, `queued 37`, `shipped 37`, `dropped 0`, `failed 0`, `skipped 119`, and Docker showed it **healthy**. `queued` is what makes a delivery stall distinguishable from an idle stack: read-but-not-shipped is the one failure a `shipped` counter alone cannot show |
+| Read auth and the dashboard sign-in | no credential → 401, wrong token → 401; `GET /dashboard?token=<read token>` → 302 to `/dashboard` with an `HttpOnly; SameSite=Strict` cookie (no token left in the URL), and that cookie alone then opened the dashboard **and** the API the page calls. `/healthz`, `/readyz` and `/metrics` stay open for the platform |
+| Container hardening is real | `docker inspect` on the running services: `ReadonlyRootfs=true`, `CapDrop=[ALL]`, `no-new-privileges:true` — and both still serve traffic, so the hardening is exercised rather than declared |
+| The migration rollback works | against real PostgreSQL: `migrate` idempotent, `status` reported version 1 not dirty, the DOWN script dropped `audit_events` and `spans` while leaving telemetry's own `telemetry_schema_migrations`, and a re-run restored the schema |
 | Probe traffic stays out of the trail | before the fix, 60 of 62 events in a 15 minute window were the IdP's `/readyz`; after it, no new probe is stored and the window holds only decisions |
 | Clock skew is visible | a record dated 6 hours ahead was stored (forensics keeps it) and counted: `telemetry_events_future_dated_total 1` plus an `ingest_future_dated` warning naming the delta and the cause |
 
@@ -308,12 +311,23 @@ go test -race ./...
 # the trace join, and retention. Point it at a THROWAWAY database.
 TELEMETRY_TEST_DATABASE_URL='postgres://user:pw@host:5432/db?sslmode=disable' \
   go test ./internal/store/... -run TestPostgresStore -v
+
+# The migration lifecycle, including the DOWN script, which drops tables. The
+# second variable is the acknowledgement that makes that safe to run by
+# accident: point the URL at a throwaway database, never the shared instance.
+TELEMETRY_TEST_DATABASE_URL='postgres://user:pw@host:5432/db?sslmode=disable' \
+TELEMETRY_TEST_DESTRUCTIVE=1 \
+  go test ./internal/db/... -run TestMigrateDownAndVersionAgainstPostgres -v
 ```
+
+The two variables above are the only ones the tests read, and they are
+intentionally absent from `.env.example`: it is a deployment template, and a
+destructive toggle in it would eventually be set in a deployment.
 
 ### Bugs this run found (and fixed)
 
-The end-to-end runs were not a formality; they caught nine real defects that unit
-tests written from the same assumptions would have missed:
+The end-to-end runs were not a formality; they caught eleven real defects that
+unit tests written from the same assumptions would have missed:
 
 1. **OTLP ids were mangled.** The decoder confused hex characters with bytes,
    padding a 32-character trace id to 64. Spans then round-tripped through
@@ -349,6 +363,24 @@ tests written from the same assumptions would have missed:
    name, so `access_decision` exported over OTLP landed in ACCESS rather than
    AUTHZ. The decoded `severityNumber` was also ignored, which is worse than not
    decoding it. Both are fixed, and the parity is now a test.
+10. **The stored decision depended on the transport that carried it.** OTLP
+    attributes are flat, so an envelope that arrives nested over stdout arrives
+    as `input.subject.user_id` over OTLP. The classifier read the nested form
+    only, which meant a policy decision stored with no subject, no roles and no
+    client address — or, when the flat form carried no verdict field either,
+    dropped entirely and counted as chatter. The envelope is now rebuilt from
+    its dotted form before anything reads it, so all three transports produce
+    the same row (`TestFromMapReadsAFlattenedOTLPEnvelope`).
+11. **A record marshalled into the OTLP body was treated as prose.** A producer
+    that logs a marshalled object puts the whole record in `body`; read as
+    text, it had no field the classifier could use, so a decision exported that
+    way was silently dropped. `body` is now parsed when it holds a JSON object
+    (`TestDecodeLogsReadsARecordMarshalledIntoTheBody`).
+
+Finding 10 was found by exporting a decision three ways and diffing the stored
+rows, which is the only way this class of bug shows up: every counter was
+healthy, the pipeline reported `dropped 0`, and the trail was simply missing
+what it exists to record.
 
 Two integration-shape findings came out of the same run: SELinux denies
 container access to `/var/run/docker.sock` even for root (hence

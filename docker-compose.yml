@@ -92,6 +92,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # The service reads its configuration, talks to the database and writes to
+    # stdout: it never needs to write to its own filesystem, gain a privilege or
+    # hold a capability. An audit trail that can be rewritten by the process
+    # keeping it is not much of an audit trail.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   # Central audit logging consumer: follows every container's stdout in this
   # Compose project and forwards the structured records to the ingest API, so
@@ -145,6 +156,16 @@ services:
     # collector only ever calls GET on the container and log endpoints.
     security_opt:
       - label=disable
+      # No setuid escalation, and no capabilities at all: reading container
+      # stdout and posting JSON needs neither.
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The collector only reads the Docker socket and posts records; it has no
+    # state of its own to write.
+    read_only: true
+    tmpfs:
+      - /tmp
     depends_on:
       telemetry:
         condition: service_healthy

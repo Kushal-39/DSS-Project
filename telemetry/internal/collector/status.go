@@ -82,6 +82,7 @@ func (s *Shipper) statusHandler() http.Handler {
 			"service":    "telemetry-collector",
 			"detail":     detail,
 			"containers": s.followed.Load(),
+			"queued":     s.queued.Load(),
 			"shipped":    s.sent.Load(),
 			"dropped":    s.dropped.Load(),
 			"failed":     s.failed.Load(),
@@ -114,6 +115,10 @@ func (s *Shipper) writeMetrics(w http.ResponseWriter) {
 	fmt.Fprintf(w, "# HELP telemetry_collector_containers_followed Containers whose logs are being followed.\n")
 	fmt.Fprintf(w, "# TYPE telemetry_collector_containers_followed gauge\n")
 	fmt.Fprintf(w, "telemetry_collector_containers_followed %d\n", s.followed.Load())
+
+	fmt.Fprintf(w, "# HELP telemetry_collector_records_queued_total Records read from containers and accepted into the pipeline.\n")
+	fmt.Fprintf(w, "# TYPE telemetry_collector_records_queued_total counter\n")
+	fmt.Fprintf(w, "telemetry_collector_records_queued_total %d\n", s.queued.Load())
 
 	fmt.Fprintf(w, "# HELP telemetry_collector_records_shipped_total Records accepted by the audit ingest API.\n")
 	fmt.Fprintf(w, "# TYPE telemetry_collector_records_shipped_total counter\n")

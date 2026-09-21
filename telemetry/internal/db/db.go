@@ -113,6 +113,66 @@ func Migrate(ctx context.Context, databaseURL string, fsys fs.FS) error {
 	return nil
 }
 
+// MigrateDown rolls back every migration this service has applied.
+//
+// docs/database.md §3 requires a DOWN script for rollbacks, and a script that
+// nothing can run is not a rollback path. It is destructive by nature — it
+// drops the audit tables — so callers are expected to require explicit
+// confirmation before reaching here.
+func MigrateDown(ctx context.Context, databaseURL string, fsys fs.FS) error {
+	src, err := iofs.New(fsys, ".")
+	if err != nil {
+		return fmt.Errorf("db: failed to open embedded migrations: %w", err)
+	}
+	dsn, err := withMigrationsTable(databaseURL)
+	if err != nil {
+		return err
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", src, dsn)
+	if err != nil {
+		return fmt.Errorf("db: failed to init migrate: %w", err)
+	}
+	defer m.Close()
+
+	if err := m.Down(); err != nil {
+		if errors.Is(err, migrate.ErrNoChange) {
+			slog.Info("db: no migrations to roll back")
+			return nil
+		}
+		return fmt.Errorf("db: rollback failed: %w", err)
+	}
+	slog.Info("db: migrations rolled back", "table", migrationsTable)
+	return nil
+}
+
+// Version reports the migration version this service currently has applied, and
+// whether the schema is dirty (a failed migration that needs attention before
+// anything else is applied).
+func Version(databaseURL string, fsys fs.FS) (uint, bool, error) {
+	src, err := iofs.New(fsys, ".")
+	if err != nil {
+		return 0, false, fmt.Errorf("db: failed to open embedded migrations: %w", err)
+	}
+	dsn, err := withMigrationsTable(databaseURL)
+	if err != nil {
+		return 0, false, err
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", src, dsn)
+	if err != nil {
+		return 0, false, fmt.Errorf("db: failed to init migrate: %w", err)
+	}
+	defer m.Close()
+
+	version, dirty, err := m.Version()
+	if err != nil {
+		if errors.Is(err, migrate.ErrNilVersion) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("db: cannot read the schema version: %w", err)
+	}
+	return version, dirty, nil
+}
+
 // withMigrationsTable pins golang-migrate's version table to telemetry's own,
 // accepting both URL and keyword/value DSN forms (lib/pq supports both).
 func withMigrationsTable(databaseURL string) (string, error) {

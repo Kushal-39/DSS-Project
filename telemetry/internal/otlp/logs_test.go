@@ -47,6 +47,61 @@ const logsExport = `{
   }]
 }`
 
+// A producer that marshals its record into the body must be audited too.
+//
+// The body is documented as the message, and an SDK whose producer logs a
+// marshalled object puts a whole record there instead. Left as text, that
+// record has no field the classifier can read, so a policy decision exported
+// that way is counted as chatter and stored nowhere — the pipeline reports
+// itself healthy and the trail is missing the decision.
+func TestDecodeLogsReadsARecordMarshalledIntoTheBody(t *testing.T) {
+	payload := `{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"policy-engine"}}]},` +
+		`"scopeLogs":[{"logRecords":[{"timeUnixNano":"1758447000000000000",` +
+		`"body":{"stringValue":"{\"msg\":\"Decision Log\",\"type\":\"openpolicyagent.org/decision_logs\",\"decision_id\":\"dec-9\",\"input\":{\"subject\":{\"user_id\":\"uuid-77\",\"roles\":[\"customer\"]},\"action\":\"TRANSFER\",\"context\":{\"ip_address\":\"198.51.100.4\"}},\"result\":{\"allow\":false}}"}` +
+		`}]}]}]}`
+
+	events, skipped, err := DecodeLogs([]byte(payload), "unknown")
+	if err != nil {
+		t.Fatalf("DecodeLogs: %v", err)
+	}
+	if skipped != 0 {
+		t.Errorf("skipped = %d, want 0: a marshalled decision is not chatter", skipped)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want the decision in the body", len(events))
+	}
+
+	event := events[0]
+	if event.Category != audit.CategoryAuthz || event.Decision != audit.DecisionDeny {
+		t.Errorf("Category/Decision = %q/%q, want AUTHZ/DENY", event.Category, event.Decision)
+	}
+	if event.Subject != "uuid-77" {
+		t.Errorf("Subject = %q, want uuid-77 (read out of the body)", event.Subject)
+	}
+	if len(event.Roles) != 1 || event.Roles[0] != "customer" {
+		t.Errorf("Roles = %v, want [customer]", event.Roles)
+	}
+	if event.RemoteAddr != "198.51.100.4" {
+		t.Errorf("RemoteAddr = %q, want 198.51.100.4", event.RemoteAddr)
+	}
+	if event.RequestID != "dec-9" {
+		t.Errorf("RequestID = %q, want the decision_id", event.RequestID)
+	}
+	if event.Service != "policy-engine" {
+		t.Errorf("Service = %q, want the resource's service.name", event.Service)
+	}
+	// The message must be the decision, not a JSON blob: the dashboard shows it.
+	if strings.Contains(event.Message, "{") {
+		t.Errorf("Message = %q, want a readable summary", event.Message)
+	}
+
+	// A plain message that merely looks brace-delimited is still a message.
+	plain := `{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"{} not really json"}}]}]}]}`
+	if _, skipped, err := DecodeLogs([]byte(plain), "svc"); err != nil || skipped != 1 {
+		t.Errorf("a non-object body: skipped = %d err = %v, want it treated as an ordinary message", skipped, err)
+	}
+}
+
 // An OTel log record must land in the audit trail with the same meaning a
 // structured stdout line would have: same classifier, same identity, same
 // trace join.

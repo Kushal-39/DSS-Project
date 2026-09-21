@@ -326,8 +326,13 @@
   }
 
   function eventRow(e, withDecision) {
+    // The id travels in a data attribute, never inside a JavaScript string.
+    // Interpolating into an inline handler would mean decoding HTML entities
+    // *before* parsing the script, so a quote in a field could end the string
+    // literal and run as code — a hazard that only stays closed as long as
+    // every field in the row is validated elsewhere.
     var trace = e.trace_id
-      ? '<a class="mono link" onclick="window.__inspectTrace(\'' + esc(e.trace_id) + "');return false\" title=\"" + esc(e.trace_id) + '">' + esc(shortTrace(e.trace_id)) + "</a>"
+      ? '<a class="mono link" href="#" data-trace="' + esc(e.trace_id) + '" title="' + esc(e.trace_id) + '">' + esc(shortTrace(e.trace_id)) + "</a>"
       : "—";
     var request = e.path ? (e.method ? e.method + " " + e.path : e.path) : (e.message || e.event_type || "—");
     return "<tr>" +
@@ -450,10 +455,16 @@
       });
   }
 
-  window.__inspectTrace = function (traceID) {
-    document.getElementById("trace-input").value = traceID;
-    inspect(traceID);
-  };
+  // One delegated listener for every trace link in the page, added once. The
+  // rows are rebuilt on every refresh, so per-element handlers would have to be
+  // reattached; the id is read from the element that was clicked.
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest("[data-trace]");
+    if (!link) return;
+    event.preventDefault();
+    document.getElementById("trace-input").value = link.dataset.trace;
+    inspect(link.dataset.trace);
+  });
 
   function inspect(traceID) {
     var el = document.getElementById("trace-result");

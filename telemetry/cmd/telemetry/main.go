@@ -4,6 +4,8 @@
 // Subcommands, mirroring the IdP's lifecycle (idp/cmd/server):
 //
 //	telemetry migrate   apply the audit schema (idempotent)
+//	telemetry migrate down --yes   roll the audit schema back (destructive)
+//	telemetry migrate status      report the applied schema version
 //	telemetry serve     run the ingest + read API and the dashboard
 //
 // The container entrypoint runs `migrate` then `serve`, as docs/database.md §4
@@ -48,7 +50,7 @@ func main() {
 	case "serve":
 		err = runServe(ctx, logger)
 	case "migrate":
-		err = runMigrate(ctx, logger)
+		err = runMigrate(ctx, logger, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -85,15 +87,73 @@ Environment (see .env.example):
 `)
 }
 
-func runMigrate(ctx context.Context, logger *slog.Logger) error {
+// runMigrate applies, rolls back or reports the audit schema.
+//
+// A rollback drops the audit tables, so it needs an explicit --yes: an operator
+// who mistypes a subcommand should not discover it from an empty audit trail.
+func runMigrate(ctx context.Context, logger *slog.Logger, args []string) error {
+	action := "up"
+	if len(args) > 0 {
+		action = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 	if cfg.Store == config.StoreMemory {
-		logger.Info("migrate: skipped (TELEMETRY_STORE=memory has no schema)")
+		logger.Info("migrate: skipped", "store", "memory", "detail", "the in-memory store has no schema")
 		return nil
 	}
+
+	switch action {
+	case "up", "":
+		return migrateUp(ctx, cfg, logger)
+	case "down":
+		if !hasFlag(args[1:], "--yes") {
+			return fmt.Errorf("migrate down drops the audit_events and spans tables. " +
+				"Re-run with --yes if that is what you want")
+		}
+		return migrateDown(ctx, cfg, logger)
+	case "status", "version":
+		return migrateStatus(cfg, logger)
+	default:
+		return fmt.Errorf("migrate: unknown action %q (use up, down --yes, or status)", action)
+	}
+}
+
+func hasFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if strings.EqualFold(arg, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+func migrateStatus(cfg *config.Config, logger *slog.Logger) error {
+	version, dirty, err := db.Version(cfg.DatabaseURL, migrations.FS)
+	if err != nil {
+		return err
+	}
+	logger.Info("migrate: status", "version", version, "dirty", dirty)
+	if dirty {
+		return fmt.Errorf("migrate: the schema is dirty at version %d: a previous migration failed "+
+			"and must be resolved (force a version, or roll back) before anything else is applied", version)
+	}
+	return nil
+}
+
+func migrateDown(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	logger.Warn("migrate: rolling back every migration", "table", "telemetry_schema_migrations")
+	if err := db.MigrateDown(ctx, cfg.DatabaseURL, migrations.FS); err != nil {
+		return err
+	}
+	logger.Info("migrate: rollback complete")
+	return nil
+}
+
+func migrateUp(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	logger.Info("migrate: starting")
 
 	// The entrypoint migrates before it serves, so a database that is still

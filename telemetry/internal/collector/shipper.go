@@ -178,6 +178,11 @@ type Shipper struct {
 
 	queue chan record
 
+	// queued counts records accepted into the pipeline, so the difference
+	// between what was read and what was shipped (sent + failed) is visible
+	// rather than inferred: a collector that is reading but not delivering is
+	// the failure this component exists to make detectable.
+	queued  atomic.Int64
 	sent    atomic.Int64
 	dropped atomic.Int64
 	failed  atomic.Int64
@@ -441,6 +446,7 @@ func (s *Shipper) enqueue(service string, line []byte) bool {
 	}
 	select {
 	case s.queue <- record{service: service, line: enriched}:
+		s.queued.Add(1)
 		return true
 	default:
 		// The ingest API is not keeping up. Shed the *newest* line rather than

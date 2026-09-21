@@ -371,6 +371,138 @@ func TestProbeTrafficIsNotAnAuditEvent(t *testing.T) {
 
 // Two records that differ only in how the envelope was spelled must not share a
 // fingerprint, or an ingest deduplicates a distinct decision away.
+// The same decision reaches this service in two encodings. Over stdout it keeps
+// its nesting; over OTLP the attributes are flat, so the envelope arrives as
+// dotted names ("input.subject.user_id"). Storing a different decision because
+// of the transport would make the trail's meaning depend on the exporter, so
+// both must classify identically — including what a reviewer can see: subject,
+// roles and client address.
+func TestFromMapReadsAFlattenedOTLPEnvelope(t *testing.T) {
+	nested, ok := FromMap(map[string]any{
+		"time":   "2026-09-21T08:00:00Z",
+		"msg":    "Decision Log",
+		"type":   "openpolicyagent.org/decision_logs",
+		"input":  map[string]any{"subject": map[string]any{"user_id": "uuid-1111", "roles": []any{"customer"}}, "action": "TRANSFER", "context": map[string]any{"ip_address": "192.168.1.50"}},
+		"result": map[string]any{"allow": false},
+	}, "policy-engine")
+	if !ok {
+		t.Fatal("the nested shape was not classified, so this test proves nothing")
+	}
+
+	// The identical record as an OTel exporter writes it: flat dotted keys.
+	flat, ok := FromMap(map[string]any{
+		"time":                        "2026-09-21T08:00:00Z",
+		"msg":                         "Decision Log",
+		"type":                        "openpolicyagent.org/decision_logs",
+		"decision_id":                 "dec-1",
+		"input.subject.user_id":       "uuid-1111",
+		"input.subject.roles":         []any{"customer"},
+		"input.action":                "TRANSFER",
+		"input.context.ip_address":    "192.168.1.50",
+		"input.context.mTLS_verified": true,
+		"result.allow":                false,
+	}, "policy-engine")
+	if !ok {
+		t.Fatal("a policy decision exported as flattened attributes was dropped: the audience for an OTLP integration is exactly this shape")
+	}
+
+	if flat.Category != CategoryAuthz || flat.Decision != DecisionDeny || flat.Reason != "policy_denied" {
+		t.Errorf("Category/Decision/Reason = %q/%q/%q, want AUTHZ/DENY/policy_denied",
+			flat.Category, flat.Decision, flat.Reason)
+	}
+	// The three fields any question about a denial is answered from.
+	if flat.Subject != nested.Subject {
+		t.Errorf("Subject = %q, want %q (the same as the nested encoding)", flat.Subject, nested.Subject)
+	}
+	if len(flat.Roles) != 1 || flat.Roles[0] != "customer" {
+		t.Errorf("Roles = %v, want [customer]", flat.Roles)
+	}
+	if flat.RemoteAddr != "192.168.1.50" {
+		t.Errorf("RemoteAddr = %q, want 192.168.1.50", flat.RemoteAddr)
+	}
+	if flat.Action != "TRANSFER" {
+		t.Errorf("Action = %q, want TRANSFER", flat.Action)
+	}
+	if flat.RequestID != "dec-1" {
+		t.Errorf("RequestID = %q, want the decision_id", flat.RequestID)
+	}
+	// Same decision, same timestamp, same verdict: the two encodings must also
+	// collapse to one row rather than being stored twice.
+	nested.RequestID = flat.RequestID
+	if flat.Fingerprint() == nested.Fingerprint() {
+		t.Error("the two encodings collide into one row: a producer that changes transport would lose its earlier records")
+	}
+}
+
+// A flattened envelope must not cost the legitimately dotted names their
+// meaning: rebuilding "http.request.method" into an object would delete the
+// very fields the OpenTelemetry conventions path reads.
+func TestFlattenedEnvelopeDoesNotBreakDottedSemanticConventions(t *testing.T) {
+	event, ok := FromMap(map[string]any{
+		"msg":                       "http_request",
+		"http.request.method":       "get",
+		"url.path":                  "/api/v1/accounts/987",
+		"http.response.status_code": float64(403),
+		"client.address":            "203.0.113.7",
+		"input.subject.user_id":     "uuid-2222",
+		"input.context.ip_address":  "10.1.2.3",
+	}, "api-gateway")
+	if !ok {
+		t.Fatal("an access line with flattened envelope fields was not classified")
+	}
+	if event.Method != "GET" || event.Path != "/api/v1/accounts/987" || event.Status != 403 {
+		t.Errorf("Method/Path/Status = %q/%q/%d, want GET//api/v1/accounts/987/403",
+			event.Method, event.Path, event.Status)
+	}
+	if event.Decision != DecisionDeny || event.Reason != "forbidden" {
+		t.Errorf("Decision/Reason = %q/%q, want DENY/forbidden", event.Decision, event.Reason)
+	}
+	if event.Subject != "uuid-2222" {
+		t.Errorf("Subject = %q, want uuid-2222", event.Subject)
+	}
+	// Precedence when a record carries the client address twice: the one inside
+	// the envelope is the address the decision was evaluated against, so it is
+	// the one the verdict is about. A service behind a proxy reports
+	// client.address as the proxy and input.context.ip_address as the real
+	// caller, and recording the proxy would answer "who was denied?" wrongly.
+	if event.RemoteAddr != "10.1.2.3" {
+		t.Errorf("RemoteAddr = %q, want the envelope's input.context.ip_address", event.RemoteAddr)
+	}
+
+	// With no envelope, the conventions path is the only statement available and
+	// must be read.
+	plain, ok := FromMap(map[string]any{
+		"msg":                       "http_request",
+		"http.request.method":       "post",
+		"url.path":                  "/v1/transfers",
+		"http.response.status_code": float64(200),
+		"client.address":            "203.0.113.7",
+	}, "api-gateway")
+	if !ok {
+		t.Fatal("an access line without an envelope was not classified")
+	}
+	if plain.RemoteAddr != "203.0.113.7" {
+		t.Errorf("RemoteAddr = %q, want client.address when nothing else states it", plain.RemoteAddr)
+	}
+}
+
+// A properly nested envelope always wins over a dotted reconstruction of the
+// same record: the object is the more explicit of the two statements.
+func TestNestedEnvelopeWinsOverDottedKeys(t *testing.T) {
+	event, ok := FromMap(map[string]any{
+		"msg":                 "access_decision",
+		"input":               map[string]any{"subject": map[string]any{"user_id": "from-the-object"}},
+		"input.subject.roles": []any{"admin"},
+		"decision":            "permit",
+	}, "svc")
+	if !ok {
+		t.Fatal("not classified")
+	}
+	if event.Subject != "from-the-object" {
+		t.Errorf("Subject = %q, want the nested object to win", event.Subject)
+	}
+}
+
 func TestEnvelopesDoNotCollideInFingerprint(t *testing.T) {
 	flat, ok := FromLogLine([]byte(`{"msg":"access_decision","user_id":"a","decision":"deny","reason":"x"}`), "svc")
 	if !ok {

@@ -77,6 +77,7 @@ func TestMetricsExposeTheCollectorsCounters(t *testing.T) {
 	shipper := testShipper(nil)
 	shipper.lastDiscovery.Store(time.Now().UnixNano())
 	shipper.followed.Store(8)
+	shipper.queued.Add(128)
 	shipper.sent.Add(120)
 	shipper.dropped.Add(3)
 	shipper.failed.Add(4)
@@ -92,6 +93,7 @@ func TestMetricsExposeTheCollectorsCounters(t *testing.T) {
 	}
 	for _, want := range []string{
 		"telemetry_collector_containers_followed 8",
+		"telemetry_collector_records_queued_total 128",
 		"telemetry_collector_records_shipped_total 120",
 		"telemetry_collector_records_dropped_total 3",
 		"telemetry_collector_batches_failed_total 4",
@@ -104,6 +106,35 @@ func TestMetricsExposeTheCollectorsCounters(t *testing.T) {
 	}
 	if strings.Contains(body, "telemetry_collector_last_ingest_seconds_ago -1") {
 		t.Error("last_ingest should report a real age once a batch has been accepted")
+	}
+
+	// queued > shipped means records are read but not delivered. That gap is the
+	// only way to tell "nothing is happening" from "the ingest API is refusing
+	// everything", which is why it is reported next to the other counters.
+	if !strings.Contains(body, "telemetry_collector_records_queued_total 128") {
+		t.Errorf("queued is not reported, so a delivery stall cannot be seen:\n%s", body)
+	}
+}
+
+// A successful enqueue and a shed record must be counted differently: one is
+// input accepted, the other is audit data lost, and a single counter for both
+// would make a queue overflow look like normal traffic.
+func TestEnqueueCountsAcceptedRecordsSeparatelyFromShedOnes(t *testing.T) {
+	shipper := testShipper(nil)
+	shipper.queue = make(chan record, 1)
+
+	shipper.enqueue("idp", []byte(`{"msg":"http_request","status":200}`))
+	shipper.enqueue("idp", []byte(`{"msg":"http_request","status":401}`))
+	shipper.enqueue("idp", []byte("not json at all"))
+
+	if got := shipper.queued.Load(); got != 1 {
+		t.Errorf("queued = %d, want only the record that entered the pipeline", got)
+	}
+	if got := shipper.dropped.Load(); got != 1 {
+		t.Errorf("dropped = %d, want the shed record", got)
+	}
+	if got := shipper.skipped.Load(); got != 1 {
+		t.Errorf("skipped = %d, want the unstructured line", got)
 	}
 }
 

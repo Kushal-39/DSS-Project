@@ -37,18 +37,24 @@ func FromLogLine(line []byte, defaultService string) (Event, bool) {
 // directly to the ingest API go through this too, so push and pull ingestion
 // behave identically.
 func FromMap(raw map[string]any, defaultService string) (Event, bool) {
-	// Producers rarely send a flat record. The project's ABAC contract wraps the
-	// request in {"input": {...}} (docs/division.md) and an OPA decision log
-	// nests the verdict under "result", so classification reads a flattened view
-	// while the original payload is kept for forensics.
-	fields := flattenEnvelope(raw)
+	// Producers rarely send a flat record, and the envelope does not always
+	// arrive as an object. The project's ABAC contract wraps the request in
+	// {"input": {...}} (docs/division.md) and an OPA decision log nests the
+	// verdict under "result"; a record exported through an OTel SDK carries the
+	// same facts as dotted attribute names ("input.subject.user_id"), because
+	// OTLP attributes are flat. Rebuilding the nesting first means the stored
+	// decision does not depend on which of the two the producer chose.
+	record := nestDottedKeys(raw)
+	// Classification reads a flattened view; the original payload is kept for
+	// forensics exactly as the producer wrote it.
+	fields := flattenEnvelope(record)
 
 	// OPA's own decision log is a security decision that happens to arrive in
 	// OPA's house style: the verdict is an object under "result", the request is
 	// under "input", and the event calls itself "Decision Log". Recognising it is
 	// what makes `--set decision_logs.console=true` a complete integration for
 	// the Policy Engine instead of one that needs a shim.
-	if isOPADecisionLog(raw) {
+	if isOPADecisionLog(record) {
 		fields["msg"] = "policy_decision"
 		if _, exists := fields["request_id"]; !exists {
 			fields["request_id"] = stringField(fields, "decision_id")
@@ -355,6 +361,80 @@ func isOPADecisionLog(raw map[string]any) bool {
 	_, hasInput := raw["input"]
 	_, hasResult := raw["result"]
 	return hasInput || hasResult
+}
+
+// nestedRoots are the field names whose nested objects are rebuilt from their
+// dotted form.
+//
+// The list is closed on purpose. A record is full of legitimately dotted names
+// ("http.request.method", "rpc.service", "http.response.status_code") and
+// rebuilding those would destroy the very fields the classifier reads. Only the
+// security envelope is reconstructed, and only when it did not arrive as an
+// object.
+var nestedRoots = map[string]bool{
+	"input":   true,
+	"result":  true,
+	"subject": true,
+	"context": true,
+}
+
+// nestDottedKeys turns "input.subject.user_id": "x" back into
+// {"input": {"subject": {"user_id": "x"}}}, so a flattened record classifies
+// exactly like a nested one.
+//
+// Without this, the same policy decision sent by an OTel exporter is stored
+// with no subject, no role and no client address — or, when the flat form has
+// no verdict field the classifier recognises, dropped altogether. That is the
+// worst shape of bug this pipeline has: everything looks healthy and the trail
+// is quietly missing what it exists to record.
+func nestDottedKeys(raw map[string]any) map[string]any {
+	if len(raw) == 0 {
+		return raw
+	}
+	var nested map[string]any
+	for key, value := range raw {
+		root, rest, found := strings.Cut(key, ".")
+		if !found || rest == "" || !nestedRoots[root] {
+			continue
+		}
+		// A properly nested envelope always wins: a producer that sends both is
+		// sending a contradiction, and the object is the more explicit of the two.
+		if _, isObject := raw[root].(map[string]any); isObject {
+			continue
+		}
+		if nested == nil {
+			nested = make(map[string]any, len(raw))
+			for field, original := range raw {
+				nested[field] = original
+			}
+		}
+		insertPath(nested, strings.Split(key, "."), value)
+	}
+	if nested == nil {
+		return raw
+	}
+	return nested
+}
+
+// insertPath writes a value at a dotted path, creating the objects along it and
+// leaving anything already there alone (the most specific key written wins).
+func insertPath(target map[string]any, path []string, value any) {
+	for _, part := range path[:len(path)-1] {
+		if part == "" {
+			return
+		}
+		child, ok := target[part].(map[string]any)
+		if !ok {
+			child = make(map[string]any)
+			target[part] = child
+		}
+		target = child
+	}
+	if last := path[len(path)-1]; last != "" {
+		if _, exists := target[last]; !exists {
+			target[last] = value
+		}
+	}
 }
 
 // flattenEnvelope resolves the wrapper shapes the security components send.

@@ -120,18 +120,28 @@ func logRecordToEvent(record WireLogRecord, service string) (audit.Event, bool) 
 			fields["level"] = level
 		}
 	}
-	// A string body is the record's message and, for this project's producers,
-	// also its event name: every component logs {"msg":"http_request", ...}, so
-	// an OTel export of the same decision writes "http_request" into body.
-	// Promoting it to "msg" is what makes an OTel record and a stdout line
-	// classify identically — without it, the same decision lands in a different
-	// category purely because of how it was transported.
-	if message, ok := valueAny(record.Body).(string); ok && message != "" {
-		if _, exists := fields["message"]; !exists {
-			fields["message"] = message
-		}
-		if !hasEventName(fields) {
-			fields["msg"] = message
+
+	// A string body is either the message or a whole record that the producer
+	// marshalled into the body. Both are common, and the difference decides
+	// whether the record is audited or counted as chatter, so it is handled in
+	// one place.
+	if body, ok := valueAny(record.Body).(string); ok && body != "" {
+		// A whole record marshalled into the body is read as fields, not as
+		// prose: left as text it has no field the classifier can read, so a
+		// policy decision exported that way would be counted as chatter and
+		// stored nowhere. Anything else is the message, and for this project's
+		// producers also the event name — every component logs
+		// {"msg":"http_request", ...}, so an OTel export of the same decision
+		// writes "http_request" into body. Promoting it to "msg" is what makes
+		// an OTel record and a stdout line classify identically.
+		fromBodyObject := isJSONObject(body) && mergeJSONObject(fields, body)
+		if !fromBodyObject {
+			if _, exists := fields["message"]; !exists {
+				fields["message"] = body
+			}
+			if !hasEventName(fields) {
+				fields["msg"] = body
+			}
 		}
 	}
 
@@ -157,6 +167,29 @@ func logRecordToEvent(record WireLogRecord, service string) (audit.Event, bool) 
 	}
 
 	return audit.FromMap(fields, service)
+}
+
+// isJSONObject reports whether a string body holds a JSON object rather than a
+// message. The check is cheap and rejects a plain message before any parsing.
+func isJSONObject(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	return len(trimmed) > 1 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
+}
+
+// mergeJSONObject merges a marshalled record into the flat field map. Fields
+// the producer also set as attributes win, and the boolean result says whether
+// anything was understood, so the caller knows not to treat the text as prose.
+func mergeJSONObject(fields map[string]any, body string) bool {
+	var structured map[string]any
+	if err := json.Unmarshal([]byte(body), &structured); err != nil || len(structured) == 0 {
+		return false
+	}
+	for key, value := range structured {
+		if _, exists := fields[key]; !exists {
+			fields[key] = value
+		}
+	}
+	return true
 }
 
 // hasEventName reports whether a record already names its own event type.

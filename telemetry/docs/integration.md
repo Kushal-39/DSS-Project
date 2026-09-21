@@ -35,7 +35,12 @@ you.
 
 The read API (`GET /v1/audit/summary`, `/v1/audit/events`,
 `/v1/audit/traces/{trace_id}`, `/dashboard`) is open unless `TELEMETRY_READ_TOKEN`
-is set.
+is set. When it is set, a human opens the dashboard with
+`http://localhost:8088/dashboard?token=<read token>`: the token is exchanged for
+an `HttpOnly; SameSite=Strict` cookie and the redirect target does not carry it,
+so it stays out of the address bar, the browser history and every `Referer`
+header the page sends. `/healthz`, `/readyz` and `/metrics` stay open either way —
+they are what the platform probes, and they never echo configuration.
 
 ---
 
@@ -58,6 +63,30 @@ for richness.
 
 `log/slog`'s JSON handler already emits `time`, `level` and `msg`, so a service
 using it is compliant by default.
+
+### The same decision, whatever the transport
+
+A nested envelope is understood in all three shapes the ingest paths actually
+produce, so **the stored row does not depend on how you sent it** — including
+what a reviewer can later see, such as the subject, the roles and the client
+address.
+
+| Shape | Example | Where it comes from |
+| --- | --- | --- |
+| object | `{"input":{"subject":{"user_id":"u","roles":["customer"]}}}` | stdout, `POST /v1/audit/events`, an OTLP attribute encoded as a list |
+| dotted | `{"input.subject.user_id":"u","input.subject.roles":["customer"]}` | OTLP attributes, which are flat by definition |
+| marshalled body | `"body":{"stringValue":"{\"msg\":\"Decision Log\",…}"}` | an SDK whose producer logs a marshalled object |
+
+Only the security envelope (`input`, `result`, `subject`, `context`) is rebuilt
+from its dotted form. Legitimately dotted names — `http.request.method`,
+`http.response.status_code`, `rpc.service` — are read as themselves and are never
+rewritten.
+
+If a record states the client address twice, the one inside the envelope
+(`input.context.ip_address`) is recorded: that is the address the decision was
+evaluated against, so it is the one the verdict is about. A service behind a
+proxy is exactly the case where the two disagree, and recording the proxy would
+answer "who was denied?" wrongly.
 
 ### Known event types
 
@@ -237,7 +266,8 @@ to the `policy-engine` service's command:
       - --set=decision_logs.console=true
 ```
 
-The pipeline already understands the resulting records (they are tested):
+The pipeline already understands the resulting records — verified against the
+real OPA 1.20.2 engine writing to its own console, not a fixture:
 
 ```json
 {"decision_id":"9adac1e2-…","msg":"Decision Log","type":"openpolicyagent.org/decision_logs",
