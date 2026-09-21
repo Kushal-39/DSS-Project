@@ -11,6 +11,39 @@
 # payment-service, telemetry) is added as its own service as it lands.
 
 services:
+  policy-engine:
+    # Person 3 — OPA Policy Engine. No Dockerfile of our own: the official
+    # image runs the server directly and the policies are volume-mounted
+    # read-only (policy-as-code lives in ./policy-engine/policies).
+    # Version is PINNED (never `latest`) so every teammate evaluates
+    # identical Rego with identical semantics.
+    image: openpolicyagent/opa:1.20.2
+    command:
+      - run
+      - --server
+      # OPA binds to localhost by default — inside a container that would
+      # make the service unreachable from the compose network.
+      - --addr=0.0.0.0:8181
+      - --log-level=info
+      # Never load test fixtures into the running decision engine.
+      - "--ignore=*_test.rego"
+      - /policies
+    volumes:
+      - ./policy-engine/policies:/policies:ro
+    healthcheck:
+      # The official image has no shell/curl/wget (distroless-style base),
+      # so we don't GET /health like the idp service does. Instead we run a
+      # real policy evaluation: `opa eval --fail` exits non-zero when the
+      # query is undefined or errors, so this probe goes unhealthy if the
+      # mounted policies are missing, fail to compile, or the default-deny
+      # decision document no longer resolves to the contract shape
+      # (fail-fast, like idp's /readyz).
+      test: ['CMD', 'opa', 'eval', '--fail', '-d', '/policies', 'data.authz.allow == {"allow": false}']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   idp:
     build: ./idp
     ports:
