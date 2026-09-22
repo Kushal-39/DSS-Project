@@ -48,6 +48,23 @@ class AccountService:
         amount = request.amount
         resource = f"account_{user_id}"
 
+        # 1b. Enforce account ownership: caller must own the account unless admin
+        if str(claims.sub) != str(user_id) and "admin" not in claims.roles:
+            log_audit_event(
+                msg="access_decision",
+                decision="deny",
+                action="TRANSFER",
+                resource=resource,
+                user_id=str(claims.sub),
+                traceparent=traceparent,
+                reason="account_ownership_violation",
+                remote_addr=client_ip,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Cannot deduct from another user's account",
+            )
+
         # 2. Query database for account balance and status
         account = await db.get_account(user_id)
         if not account:

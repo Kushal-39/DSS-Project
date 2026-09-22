@@ -101,6 +101,18 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
 
         request.state.mtls_verified = mtls_verified
 
+        # 4. Emit named audit event for mTLS rejection (telemetry/docs/integration.md §Person 4)
+        if not mtls_verified and settings.TLS_REQUIRE_CLIENT_CERT:
+            log_audit_event(
+                msg="mtls_handshake_rejected",
+                decision="deny",
+                action="CONNECT",
+                resource=str(request.url.path),
+                traceparent=traceparent,
+                remote_addr=client_ip,
+                reason="no_client_certificate",
+            )
+
         try:
             response = await call_next(request)
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)

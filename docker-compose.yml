@@ -74,6 +74,8 @@ services:
       POLICY_ENGINE_URL: http://policy-engine:8181/v1/data/authz/allow
       IDP_JWKS_URL: http://idp:8080/.well-known/jwks.json
       PORT: "8082"
+      ENVIRONMENT: ${ACCOUNT_ENVIRONMENT:-production}
+      LOG_LEVEL: ${ACCOUNT_LOG_LEVEL:-INFO}
       ACCOUNT_TLS_CERT_FILE: ${ACCOUNT_TLS_CERT_FILE:-}
       ACCOUNT_TLS_KEY_FILE: ${ACCOUNT_TLS_KEY_FILE:-}
       ACCOUNT_TLS_CA_FILE: ${ACCOUNT_TLS_CA_FILE:-}
