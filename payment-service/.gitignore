@@ -1,0 +1,11 @@
+# Locally generated development certificates (payment-server certs --dir ./certs).
+#
+# A private key is never committed, not even a throwaway one: a CA key in
+# version control is how a "dev-only" certificate ends up trusted somewhere
+# real. The directory is regenerated deterministically by the one-shot
+# `payment-service-certs` Compose service.
+certs/
+
+# Local build artifacts.
+payment-server
+payment-server.exe

@@ -1,0 +1,17 @@
+# Keep the build context to source only: no local binaries, no editor spill,
+# no secrets, and above all no private keys. The generated development
+# certificates live in ./certs on the host and are mounted read-only at runtime;
+# copying a private key into an image layer would publish it to everyone who can
+# pull the image.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+build/
+bin/
+**/*.test
+payment-server
+payment-server.exe
+certs/

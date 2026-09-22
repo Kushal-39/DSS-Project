@@ -236,6 +236,144 @@ services:
       - loki
     restart: unless-stopped
 
+  #############################################################################
+  # Person 5: Payment & Transaction Service (Microservice B).
+  #
+  # The downstream financial service. It validates a client certificate on
+  # EVERY incoming connection (TLS 1.3, shared CA, identity allowlist), verifies
+  # the bearer token itself, re-checks the decision with the Policy Engine, asks
+  # the Account Service to debit, and records the result in its own immutable
+  # `transactions` ledger.
+  #
+  # Two services, because strict mTLS needs certificates and a private key must
+  # never be baked into an image layer:
+  #
+  #   payment-service-certs  one-shot, runs as root, mints the local development
+  #                          CA and the certificates into ./payment-service/certs
+  #                          on the host (idempotent: it does nothing when the
+  #                          bundle is complete).
+  #   payment-service        the API, non-root, certificate material mounted
+  #                          READ-ONLY.
+  #############################################################################
+  payment-service-certs:
+    build: ./payment-service
+    # The image's entrypoint is replaced: this container only mints certificates.
+    entrypoint: ["/app/payment-server", "certs", "--dir", "/certs"]
+    # Root so the files can be created in a bind mount Docker just made for the
+    # host. On Linux the private keys come out root-owned and 0600; set
+    # PAYMENT_CERTS_UID/PAYMENT_CERTS_GID to your own `id -u`/`id -g` in .env if
+    # you want to read them from the host (the README's curl steps need that).
+    user: "${PAYMENT_CERTS_UID:-0}:${PAYMENT_CERTS_GID:-0}"
+    volumes:
+      - ${PAYMENT_CERTS_DIR:-./payment-service/certs}:/certs
+    # Nothing to restart: it either minted the bundle and exited 0, or it failed
+    # and the service below must not start (private keys that do not exist are
+    # not a configuration a payment service should improvise around).
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  payment-service:
+    build: ./payment-service
+    ports:
+      # A LOCAL DEVELOPMENT convenience so the verification steps in
+      # payment-service/README.md can be run from the host. In a real
+      # deployment this service is reachable only from the API Gateway (Person
+      # 2) over the Compose network, and this mapping would not exist.
+      - "${PAYMENT_PORT:-8081}:8081"
+    environment:
+      # The ledger. This service owns `transactions` and no other table
+      # (docs/database.md §2); its migration bookkeeping is namespaced so it
+      # cannot collide with another service's on the shared instance.
+      DATABASE_URL: ${DATABASE_URL}
+      PAYMENT_STORE: ${PAYMENT_STORE:-postgres}
+      PAYMENT_SERVICE_NAME: payment-service
+      PAYMENT_LOG_LEVEL: ${PAYMENT_LOG_LEVEL:-info}
+
+      # --- Transport Contract: mTLS on every connection -------------------
+      PAYMENT_TLS_CERT_FILE: /certs/payment-service.crt
+      PAYMENT_TLS_KEY_FILE: /certs/payment-service.key
+      PAYMENT_TLS_CA_FILE: /certs/ca.crt
+      PAYMENT_TLS_REQUIRE_CLIENT_CERT: ${PAYMENT_TLS_REQUIRE_CLIENT_CERT:-true}
+      # Who may move money. The `probe` certificate used by the health check is
+      # deliberately not listed: it can ask whether the service is alive, and
+      # cannot call /transfer.
+      PAYMENT_ALLOWED_CLIENT_IDS: ${PAYMENT_ALLOWED_CLIENT_IDS:-gateway,account-service}
+
+      # --- Person 1: verify the token again, at this boundary -------------
+      PAYMENT_JWKS_URL: ${PAYMENT_JWKS_URL:-http://idp:8080/.well-known/jwks.json}
+      PAYMENT_JWT_AUDIENCE: ${PAYMENT_JWT_AUDIENCE:-zerotrust-api-gateway}
+
+      # --- Person 3: the authorization decision ---------------------------
+      # http is the endpoint docs/policymaker.md specifies; the engine gains a
+      # TLS listener as deferred hardening on Person 3's side.
+      PAYMENT_POLICY_URL: ${PAYMENT_POLICY_URL:-http://policy-engine:8181/v1/data/authz/allow}
+
+      # --- Person 4: the only component that owns the balances ------------
+      # https and mutual TLS by default (this service presents
+      # payment-service-client.crt). Person 4's service must mount this volume
+      # and trust the same CA to accept the call.
+      PAYMENT_ACCOUNT_SERVICE_URL: ${PAYMENT_ACCOUNT_SERVICE_URL:-https://account-service:8082}
+      PAYMENT_UPSTREAM_TLS_CERT_FILE: /certs/payment-service-client.crt
+      PAYMENT_UPSTREAM_TLS_KEY_FILE: /certs/payment-service-client.key
+      PAYMENT_UPSTREAM_TLS_CA_FILE: /certs/ca.crt
+      PAYMENT_ALLOW_INSECURE_UPSTREAM: ${PAYMENT_ALLOW_INSECURE_UPSTREAM:-false}
+
+      # --- Person 6: spans; audit decisions go to stdout regardless --------
+      PAYMENT_OTLP_ENDPOINT: ${PAYMENT_OTLP_ENDPOINT:-http://telemetry:8088/v1/traces}
+      PAYMENT_OTLP_TOKEN: ${TELEMETRY_INGEST_TOKEN:-}
+    volumes:
+      # Read-only: the service reads its own certificate and the shared CA, and
+      # has no reason to write anything to this directory.
+      - ${PAYMENT_CERTS_DIR:-./payment-service/certs}:/certs:ro
+    depends_on:
+      payment-service-certs:
+        condition: service_completed_successfully
+      # The Policy Engine is on the request path for every transfer, so it is
+      # worth gating startup on it. The IdP is not gated: the key set is fetched
+      # lazily (and the first fetch is retried), so this service can start
+      # before the IdP is healthy and reports readiness honestly either way.
+      policy-engine:
+        condition: service_healthy
+    healthcheck:
+      # The listener refuses a peer without a client certificate, so the probe
+      # has to be able to present one — busybox `wget` cannot, which is why the
+      # image's own binary performs this check.
+      test:
+        - CMD
+        - /app/payment-server
+        - healthcheck
+        - --url
+        - https://localhost:8081/healthz
+        - --ca
+        - /certs/ca.crt
+        - --cert
+        - /certs/probe.crt
+        - --key
+        - /certs/probe.key
+        - --server-name
+        - localhost
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # The service reads its configuration, talks to its dependencies and writes
+    # to stdout. It never needs to write to its own filesystem, gain a privilege
+    # or hold a capability — and a payment service that can rewrite its own
+    # binary is one an attacker does not have to attack.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
 networks:
   default:
     # The Supabase host resolves only to IPv6 on this deployment (no A
