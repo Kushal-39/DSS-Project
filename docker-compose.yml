@@ -62,6 +62,37 @@ services:
       start_period: 15s
 
   #############################################################################
+  # Person 4: Microservice A (Account Service)
+  # Account balance management, policy enforcement, and atomic deductions.
+  #############################################################################
+  account-service:
+    build: ./account-service
+    ports:
+      - "${ACCOUNT_SERVICE_PORT:-8082}:8082"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      POLICY_ENGINE_URL: http://policy-engine:8181/v1/data/authz/allow
+      IDP_JWKS_URL: http://idp:8080/.well-known/jwks.json
+      PORT: "8082"
+      ENVIRONMENT: ${ACCOUNT_ENVIRONMENT:-production}
+      LOG_LEVEL: ${ACCOUNT_LOG_LEVEL:-INFO}
+      ACCOUNT_TLS_CERT_FILE: ${ACCOUNT_TLS_CERT_FILE:-}
+      ACCOUNT_TLS_KEY_FILE: ${ACCOUNT_TLS_KEY_FILE:-}
+      ACCOUNT_TLS_CA_FILE: ${ACCOUNT_TLS_CA_FILE:-}
+      ACCOUNT_TLS_REQUIRE_CLIENT_CERT: ${ACCOUNT_TLS_REQUIRE_CLIENT_CERT:-false}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      idp:
+        condition: service_healthy
+      policy-engine:
+        condition: service_healthy
+
+  #############################################################################
   # Person 6: Observability, Distributed Tracing & Centralized Logging.
   # The audit ingest/read API, the OTLP span receiver and the dashboard.
   #############################################################################
