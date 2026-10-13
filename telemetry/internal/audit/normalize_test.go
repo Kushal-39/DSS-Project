@@ -490,3 +490,17 @@ func TestDeterministicIDIsUUIDShaped(t *testing.T) {
 		t.Error("NewID is not UUID shaped")
 	}
 }
+
+func TestOPADecisionJoinsTraceFromPolicyContext(t *testing.T) {
+	event, ok := FromMap(map[string]any{
+		"msg": "Decision Log", "type": "openpolicyagent.org/decision_logs",
+		"input":  map[string]any{"context": map[string]any{"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}},
+		"result": map[string]any{"allow": true},
+	}, "policy-engine")
+	if !ok {
+		t.Fatal("OPA decision was not recognized")
+	}
+	if event.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("trace = %q", event.TraceID)
+	}
+}

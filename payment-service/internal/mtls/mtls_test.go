@@ -461,3 +461,34 @@ func loadLeaf(t *testing.T, path string) *x509.Certificate {
 	}
 	return certificate
 }
+
+func TestStalledHandshakeCannotBlockAValidClient(t *testing.T) {
+	m := newMaterial(t)
+	serverTLS, err := (ServerSettings{CertFile: m.certFile, KeyFile: m.keyFile, CAFile: m.caFile, RequireClientCert: true}).ServerConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := NewListener(raw, serverTLS, 5*time.Second, nil)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") })}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	stalled, err := net.Dial("tcp", raw.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stalled.Close()
+	// The peer sends no TLS bytes and stays open until after the legitimate request.
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: clientTLSConfig(t, m)}}
+	response, err := client.Get("https://" + raw.Addr().String() + "/healthz")
+	if err != nil {
+		t.Fatalf("a stalled peer blocked valid traffic: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+}

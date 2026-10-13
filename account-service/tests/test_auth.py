@@ -43,6 +43,7 @@ class TestAuth(unittest.IsolatedAsyncioTestCase):
         self.verifier = JWTVerifier("http://mock-idp/.well-known/jwks.json")
 
     def _generate_token(self, payload, headers=None):
+        payload = {"iss": "http://idp:8080", "aud": "zerotrust-api-gateway", **payload}
         hdr = {"kid": "test-key-id"}
         if headers:
             hdr.update(headers)
@@ -80,7 +81,7 @@ class TestAuth(unittest.IsolatedAsyncioTestCase):
             self.assertIn("expired", ctx.exception.detail.lower())
 
     async def test_invalid_algorithm_rejected(self):
-        token = jwt.encode({"sub": "user-1"}, "secret", algorithm="HS256")
+        token = jwt.encode({"sub": "user-1"}, "untrusted-test-secret-with-at-least-32-bytes", algorithm="HS256")
         with self.assertRaises(HTTPException) as ctx:
             await self.verifier.verify_token(token)
         self.assertEqual(ctx.exception.status_code, 401)

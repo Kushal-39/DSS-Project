@@ -103,7 +103,7 @@ func TestIssueAndVerify(t *testing.T) {
 			return nil, errors.New("kid header mismatch")
 		}
 		return &signKey.Private.PublicKey, nil
-	}, jwt.WithIssuer("http://idp:8080"), jwt.WithAudience("zerotrust-api-gateway"), jwt.WithExpirationRequired())
+	}, jwt.WithIssuer("http://idp:8080"), jwt.WithAudience("zerotrust-api-gateway"), jwt.WithExpirationRequired(), jwt.WithTimeFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("ParseWithClaims: %v", err)
 	}

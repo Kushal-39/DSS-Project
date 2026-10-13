@@ -6,3 +6,8 @@
 bin/
 build/
 idp-server
+
+.env
+certs
+*.key
+*.pem

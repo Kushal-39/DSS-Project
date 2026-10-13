@@ -39,6 +39,7 @@ WORKDIR /app
 
 COPY --from=build /out/payment-server /app/payment-server
 COPY entrypoint.sh /app/entrypoint.sh
+COPY provision-certs.sh /app/provision-certs.sh
 RUN chmod 0755 /app/entrypoint.sh
 
 USER payment

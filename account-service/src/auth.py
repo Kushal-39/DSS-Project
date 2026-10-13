@@ -39,10 +39,7 @@ class JWTVerifier:
                 return data
         except Exception as e:
             logger.warning(f"Failed to fetch JWKS from IdP ({self.jwks_url}): {e}")
-            if self._cached_jwks:
-                logger.info("Using stale JWKS cache")
-                return self._cached_jwks
-            raise
+            raise HTTPException(status_code=503, detail="Identity verification unavailable")
 
     async def verify_token(self, token: str) -> TokenClaims:
         """Verify RS256 JWT signature against IdP JWKS and return claims."""
@@ -59,6 +56,9 @@ class JWTVerifier:
                     detail="Invalid token algorithm (RS256 required)",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+
+            if not kid:
+                raise HTTPException(status_code=401, detail="Token missing signing key ID")
 
             # Get public key
             jwks = await self._fetch_jwks()
@@ -87,7 +87,9 @@ class JWTVerifier:
                 token,
                 key=public_key,
                 algorithms=["RS256"],
-                options={"verify_aud": False},  # Audience verification optional
+                audience=settings.JWT_AUDIENCE,
+                issuer=settings.JWT_ISSUER,
+                options={"require": ["exp", "sub", "iss", "aud"]},
             )
 
             user_id = payload.get("sub")

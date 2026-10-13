@@ -116,3 +116,14 @@ python -m uvicorn src.main:app --host 0.0.0.0 --port 8082
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Integrated deployment
+
+Build from the repository root (`docker compose up --build`). The container
+entrypoint uses `python -m src.main` to apply its real TLS 1.3 context and
+require CA-verified peer certificates. Client-certificate headers are ignored
+for authentication; a socket-level protocol exposes the verified certificate
+to ASGI. Gateway and payment have separate certificate mounts. Balance reads
+also query OPA, and spans export to telemetry. Local tests need the root on
+`PYTHONPATH` because `common/observability.py` is shared with the gateway.
+Use `scripts/test-all.sh` from the root for the complete disposable-stack suite.

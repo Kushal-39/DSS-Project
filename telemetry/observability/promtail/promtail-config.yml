@@ -45,7 +45,7 @@ scrape_configs:
       # override COMPOSE_PROJECT_NAME, and keep it in step with
       # TELEMETRY_SHIP_PROJECT so both log paths cover the same containers.
       - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
-        regex: 'dss-project'
+        regex: '${COMPOSE_PROJECT_NAME}'
         action: keep
       # __meta_docker_container_name arrives with a leading slash.
       - source_labels: ['__meta_docker_container_name']

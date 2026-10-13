@@ -7,10 +7,45 @@
 #     DATABASE_URL          PostgreSQL connection string (Supabase)
 #     IDP_RSA_PRIVATE_KEY   IdP signing key, PEM, "\n"-escaped
 #
-# Each microservice (gateway, policy-engine, account-service,
-# payment-service, telemetry) is added as its own service as it lands.
+# Gateway, identity, policy, business services, and observability run together.
 
 services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "0.0.0.0:${GATEWAY_PORT:-8080}:8080"
+    environment:
+      JWT_ISSUER: ${IDP_JWT_ISSUER:-http://idp:8080}
+      JWT_AUDIENCE: ${IDP_JWT_AUDIENCE:-zerotrust-api-gateway}
+      GATEWAY_RATE_LIMIT: ${GATEWAY_RATE_LIMIT:-120}
+      GATEWAY_RATE_WINDOW: ${GATEWAY_RATE_WINDOW:-60}
+      OTLP_ENDPOINT: http://telemetry:8088/v1/traces
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
+    volumes:
+      - gateway-certs:/certs:ro
+    depends_on:
+      idp:
+        condition: service_healthy
+      account-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/readyz')"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   policy-engine:
     # Person 3 — OPA Policy Engine. No Dockerfile of our own: the official
     # image runs the server directly and the policies are volume-mounted
@@ -21,10 +56,12 @@ services:
     command:
       - run
       - --server
+      - --watch
       # OPA binds to localhost by default — inside a container that would
       # make the service unreachable from the compose network.
       - --addr=0.0.0.0:8181
       - --log-level=info
+      - --set=decision_logs.console=true
       # Never load test fixtures into the running decision engine.
       - "--ignore=*_test.rego"
       - /policies
@@ -46,11 +83,14 @@ services:
 
   idp:
     build: ./idp
-    ports:
-      - "8080:8080"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       IDP_RSA_PRIVATE_KEY: ${IDP_RSA_PRIVATE_KEY}
+      IDP_JWT_ISSUER: ${IDP_JWT_ISSUER:-http://idp:8080}
+      IDP_JWT_AUDIENCE: ${IDP_JWT_AUDIENCE:-zerotrust-api-gateway}
+      IDP_JWT_TTL: ${IDP_JWT_TTL:-15m}
+      OTLP_ENDPOINT: http://telemetry:8088/v1/traces
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
     healthcheck:
       # /readyz pings the database, so the health state reflects whether the
       # IdP can actually serve traffic — downstream services (e.g. the API
@@ -66,27 +106,35 @@ services:
   # Account balance management, policy enforcement, and atomic deductions.
   #############################################################################
   account-service:
-    build: ./account-service
-    ports:
-      - "${ACCOUNT_SERVICE_PORT:-8082}:8082"
+    build:
+      context: .
+      dockerfile: account-service/Dockerfile
     environment:
       DATABASE_URL: ${DATABASE_URL}
       POLICY_ENGINE_URL: http://policy-engine:8181/v1/data/authz/allow
       IDP_JWKS_URL: http://idp:8080/.well-known/jwks.json
+      JWT_ISSUER: ${IDP_JWT_ISSUER:-http://idp:8080}
+      JWT_AUDIENCE: ${IDP_JWT_AUDIENCE:-zerotrust-api-gateway}
       PORT: "8082"
       ENVIRONMENT: ${ACCOUNT_ENVIRONMENT:-production}
       LOG_LEVEL: ${ACCOUNT_LOG_LEVEL:-INFO}
-      ACCOUNT_TLS_CERT_FILE: ${ACCOUNT_TLS_CERT_FILE:-}
-      ACCOUNT_TLS_KEY_FILE: ${ACCOUNT_TLS_KEY_FILE:-}
-      ACCOUNT_TLS_CA_FILE: ${ACCOUNT_TLS_CA_FILE:-}
-      ACCOUNT_TLS_REQUIRE_CLIENT_CERT: ${ACCOUNT_TLS_REQUIRE_CLIENT_CERT:-false}
+      ACCOUNT_TLS_CERT_FILE: /certs/account-server.crt
+      ACCOUNT_TLS_KEY_FILE: /certs/account-server.key
+      ACCOUNT_TLS_CA_FILE: /certs/ca.crt
+      ACCOUNT_TLS_REQUIRE_CLIENT_CERT: "true"
+      OTLP_ENDPOINT: http://telemetry:8088/v1/traces
+      TELEMETRY_INGEST_TOKEN: ${TELEMETRY_INGEST_TOKEN}
+    volumes:
+      - account-certs:/certs:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8082/readyz"]
+      test: ["CMD", "curl", "--fail", "--silent", "--cacert", "/certs/ca.crt", "--cert", "/certs/probe.crt", "--key", "/certs/probe.key", "https://localhost:8082/readyz"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 15s
     depends_on:
+      payment-service-certs:
+        condition: service_completed_successfully
       idp:
         condition: service_healthy
       policy-engine:
@@ -164,7 +212,7 @@ services:
       # The collector runs as a non-root user and reads the Docker API socket
       # through the host's docker group. Find the value with:
       #   stat -c '%g' /var/run/docker.sock
-      - "${TELEMETRY_DOCKER_GID:-960}"
+      - "${TELEMETRY_DOCKER_GID:-956}"
     volumes:
       # Read-only: the collector inspects containers and follows their logs.
       # It never starts, stops or modifies anything.
@@ -231,7 +279,9 @@ services:
   # only" path. Both read the same stdout, so neither can hide a line.
   promtail:
     image: grafana/promtail:3.1.1
-    command: -config.file=/etc/promtail/promtail-config.yml
+    command: -config.file=/etc/promtail/promtail-config.yml -config.expand-env=true
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-dss-project}
     volumes:
       - ./telemetry/observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -260,6 +310,7 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_USERS_DEFAULT_THEME: dark
+      JAEGER_BROWSER_URL: http://localhost:${JAEGER_UI_PORT:-16686}
     volumes:
       - ./telemetry/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
@@ -267,36 +318,21 @@ services:
       - loki
     restart: unless-stopped
 
-  #############################################################################
-  # Person 5: Payment & Transaction Service (Microservice B).
-  #
-  # The downstream financial service. It validates a client certificate on
-  # EVERY incoming connection (TLS 1.3, shared CA, identity allowlist), verifies
-  # the bearer token itself, re-checks the decision with the Policy Engine, asks
-  # the Account Service to debit, and records the result in its own immutable
-  # `transactions` ledger.
-  #
-  # Two services, because strict mTLS needs certificates and a private key must
-  # never be baked into an image layer:
-  #
-  #   payment-service-certs  one-shot, runs as root, mints the local development
-  #                          CA and the certificates into ./payment-service/certs
-  #                          on the host (idempotent: it does nothing when the
-  #                          bundle is complete).
-  #   payment-service        the API, non-root, certificate material mounted
-  #                          READ-ONLY.
-  #############################################################################
+  # One-shot development PKI. The authority stays in service-certs; only
+  # selected leaf certificates/keys are copied to each runtime's own volume.
+
   payment-service-certs:
     build: ./payment-service
     # The image's entrypoint is replaced: this container only mints certificates.
-    entrypoint: ["/app/payment-server", "certs", "--dir", "/certs"]
-    # Root so the files can be created in a bind mount Docker just made for the
-    # host. On Linux the private keys come out root-owned and 0600; set
-    # PAYMENT_CERTS_UID/PAYMENT_CERTS_GID to your own `id -u`/`id -g` in .env if
-    # you want to read them from the host (the README's curl steps need that).
-    user: "${PAYMENT_CERTS_UID:-0}:${PAYMENT_CERTS_GID:-0}"
+    entrypoint: ["sh", "/app/provision-certs.sh"]
+    # Root owns provisioning; runtime keys are copied with mode 0600 and
+    # assigned to UID 1001. This is the only service with filesystem capabilities.
+    user: "0:0"
     volumes:
-      - ${PAYMENT_CERTS_DIR:-./payment-service/certs}:/certs
+      - service-certs:/authority
+      - payment-certs:/payment
+      - account-certs:/account
+      - gateway-certs:/gateway
     # Nothing to restart: it either minted the bundle and exited 0, or it failed
     # and the service below must not start (private keys that do not exist are
     # not a configuration a payment service should improvise around).
@@ -308,15 +344,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
 
   payment-service:
     build: ./payment-service
-    ports:
-      # A LOCAL DEVELOPMENT convenience so the verification steps in
-      # payment-service/README.md can be run from the host. In a real
-      # deployment this service is reachable only from the API Gateway (Person
-      # 2) over the Compose network, and this mapping would not exist.
-      - "${PAYMENT_PORT:-8081}:8081"
+    user: "1001:1001"
     environment:
       # The ledger. This service owns `transactions` and no other table
       # (docs/database.md §2); its migration bookkeeping is namespaced so it
@@ -338,7 +372,8 @@ services:
 
       # --- Person 1: verify the token again, at this boundary -------------
       PAYMENT_JWKS_URL: ${PAYMENT_JWKS_URL:-http://idp:8080/.well-known/jwks.json}
-      PAYMENT_JWT_AUDIENCE: ${PAYMENT_JWT_AUDIENCE:-zerotrust-api-gateway}
+      PAYMENT_JWT_ISSUER: ${IDP_JWT_ISSUER:-http://idp:8080}
+      PAYMENT_JWT_AUDIENCE: ${IDP_JWT_AUDIENCE:-zerotrust-api-gateway}
 
       # --- Person 3: the authorization decision ---------------------------
       # http is the endpoint docs/policymaker.md specifies; the engine gains a
@@ -359,9 +394,8 @@ services:
       PAYMENT_OTLP_ENDPOINT: ${PAYMENT_OTLP_ENDPOINT:-http://telemetry:8088/v1/traces}
       PAYMENT_OTLP_TOKEN: ${TELEMETRY_INGEST_TOKEN:-}
     volumes:
-      # Read-only: the service reads its own certificate and the shared CA, and
-      # has no reason to write anything to this directory.
-      - ${PAYMENT_CERTS_DIR:-./payment-service/certs}:/certs:ro
+      # Read-only runtime identity; the authority key is not mounted.
+      - payment-certs:/certs:ro
     depends_on:
       payment-service-certs:
         condition: service_completed_successfully
@@ -412,9 +446,13 @@ networks:
     # bridge to give containers a working path to the database. AAAA-first
     # resolution with no IPv6 route otherwise fails hard with "network is
     # unreachable" and Go never falls back.
-    enable_ipv6: true
+    enable_ipv6: ${DSS_IPV6_ENABLED:-true}
 
 volumes:
+  service-certs:
+  payment-certs:
+  account-certs:
+  gateway-certs:
   # Loki's chunk/index store and Grafana's state. Named volumes so
   # `docker compose down` does not throw away the logs a reviewer is reading.
   loki-data:

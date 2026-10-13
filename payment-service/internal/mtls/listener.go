@@ -116,8 +116,14 @@ type Listener struct {
 	accepted chan net.Conn
 	// done is closed by Close to unblock Accept and any goroutine still
 	// finishing a handshake.
-	done      chan struct{}
-	closeOnce sync.Once
+	done             chan struct{}
+	closeOnce        sync.Once
+	closeErr         error
+	stopped          chan struct{}
+	terminalErr      atomic.Pointer[acceptErrSlot]
+	handshakeCtx     context.Context
+	cancelHandshakes context.CancelFunc
+	handshakes       sync.WaitGroup
 
 	// acceptErr is an atomic that remembers the first transient accept failure
 	// without letting a permanent one (bad file descriptor, Close) pass through.
@@ -145,7 +151,7 @@ func NewListener(inner net.Listener, config *tls.Config, handshakeTimeout time.D
 	if handshakeTimeout <= 0 {
 		handshakeTimeout = 5 * time.Second
 	}
-	return &Listener{
+	listener := &Listener{
 		Listener:         inner,
 		config:           config,
 		handshakeTimeout: handshakeTimeout,
@@ -153,49 +159,56 @@ func NewListener(inner net.Listener, config *tls.Config, handshakeTimeout time.D
 		slots:            make(chan struct{}, maxInFlightHandshakes),
 		accepted:         make(chan net.Conn, maxInFlightHandshakes+1),
 		done:             make(chan struct{}),
+		stopped:          make(chan struct{}),
 	}
+	listener.handshakeCtx, listener.cancelHandshakes = context.WithCancel(context.Background())
+	go listener.acceptLoop()
+	return listener
 }
 
 // Accept returns only connections whose handshake completed, so a handler can
 // never observe an unverified peer. Every refusal is classified, rate-limited
 // and reported through onReject instead of being surfaced to net/http.
 func (l *Listener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.accepted:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	case <-l.stopped:
+		if slot := l.terminalErr.Load(); slot != nil {
+			return nil, slot.v
+		}
+		return nil, net.ErrClosed
+	}
+}
+
+// Accept sockets continuously; a bad or stalled peer never serializes the next
+// handshake. Both unfinished handshakes and completed queued sockets are bounded.
+func (l *Listener) acceptLoop() {
+	defer close(l.stopped)
 	for {
-		// Take a handshake slot before accepting anything: the cap has to
-		// apply to connections that are already open, which means it has to be
-		// enforced before the accept rather than after it.
 		select {
 		case l.slots <- struct{}{}:
 		case <-l.done:
-			return nil, net.ErrClosed
+			return
 		}
-
 		conn, err := l.Listener.Accept()
 		if err != nil {
 			<-l.slots
-			// A transient accept failure is not a reason to stop serving: the
-			// listener will try again on the next call to Accept. A permanent one
-			// (Close, a bad file descriptor) clears the remembered transient errors
-			// and is propagated.
 			if l.recordAcceptErr(err) {
-				return nil, err
+				l.terminalErr.Store(&acceptErrSlot{v: err})
+				return
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-l.done:
+				return
 			}
 			continue
 		}
-
-		go l.handshake(conn)
-
-		select {
-		case accepted := <-l.accepted:
-			return accepted, nil
-		case <-l.done:
-			return nil, net.ErrClosed
-		case <-time.After(l.handshakeTimeout):
-			// Handshake failed or timed out; continue the accept loop.
-			// The handshake goroutine's defer will release the slot,
-			// allowing Accept() to try again for new connections.
-			continue
-		}
+		l.handshakes.Add(1)
+		go func() { defer l.handshakes.Done(); l.handshake(conn) }()
 	}
 }
 
@@ -206,7 +219,7 @@ func (l *Listener) handshake(conn net.Conn) {
 
 	tlsConn := tls.Server(conn, l.config)
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), l.handshakeTimeout)
+	ctx, cancel := context.WithTimeout(l.handshakeCtx, l.handshakeTimeout)
 	handshakeErr := tlsConn.HandshakeContext(ctx)
 	cancel()
 
@@ -261,17 +274,22 @@ func (acceptErrTimeout) Timeout() bool { return true }
 // finished after the server left is closed rather than drained: it belongs to a
 // server that is shutting down.
 func (l *Listener) Close() error {
-	l.closeOnce.Do(func() { close(l.done) })
-
-	err := l.Listener.Close()
-	for {
-		select {
-		case conn := <-l.accepted:
-			_ = conn.Close()
-		default:
-			return err
+	l.closeOnce.Do(func() {
+		close(l.done)
+		l.cancelHandshakes()
+		l.closeErr = l.Listener.Close()
+		<-l.stopped
+		l.handshakes.Wait()
+		for {
+			select {
+			case conn := <-l.accepted:
+				_ = conn.Close()
+			default:
+				return
+			}
 		}
-	}
+	})
+	return l.closeErr
 }
 
 // recordAcceptErr classifies an accept error as transient or permanent.

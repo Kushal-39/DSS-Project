@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -70,7 +71,14 @@ func Migrate(ctx context.Context, databaseURL string, fsys fs.FS) error {
 		return fmt.Errorf("db: failed to open embedded migrations: %w", err)
 	}
 
-	m, err := migrate.NewWithSourceInstance("iofs", src, databaseURL)
+	migrationURL, err := url.Parse(databaseURL)
+	if err != nil {
+		return err
+	}
+	query := migrationURL.Query()
+	query.Set("x-migrations-table", "idp_schema_migrations")
+	migrationURL.RawQuery = query.Encode()
+	m, err := migrate.NewWithSourceInstance("iofs", src, migrationURL.String())
 	if err != nil {
 		return fmt.Errorf("db: failed to init migrate: %w", err)
 	}

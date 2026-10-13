@@ -1,6 +1,7 @@
 """Main FastAPI Application for Account Service (Microservice A - Person 4)."""
 
 import os
+import asyncio
 import ssl
 import logging
 from contextlib import asynccontextmanager
@@ -52,6 +53,8 @@ app = FastAPI(
 
 # Attach Telemetry and Audit middleware
 app.add_middleware(TelemetryMiddleware)
+from common.observability import TraceMiddleware
+app.add_middleware(TraceMiddleware, service="account-service")
 
 # Register routes
 app.include_router(health_router)
@@ -79,11 +82,12 @@ def create_ssl_context() -> ssl.SSLContext | None:
     ca_file = settings.TLS_CA_FILE
 
     if not cert_file or not key_file:
+        if settings.TLS_REQUIRE_CLIENT_CERT or cert_file or key_file:
+            raise RuntimeError("Both TLS certificate and key are required")
         return None
 
     if not os.path.exists(cert_file) or not os.path.exists(key_file):
-        logger.warning(f"TLS certificate files not found ({cert_file}, {key_file}). Running in plain HTTP mode.")
-        return None
+        raise RuntimeError("Configured TLS certificate files do not exist")
 
     # TLS 1.3 is mandated by Transport Contract
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -100,16 +104,27 @@ def create_ssl_context() -> ssl.SSLContext | None:
             ssl_context.verify_mode = ssl.CERT_OPTIONAL
             logger.info("TLS 1.3 enabled with optional client certificate validation.")
 
+    if settings.TLS_REQUIRE_CLIENT_CERT and ssl_context.verify_mode != ssl.CERT_REQUIRED:
+        raise RuntimeError("mTLS requires a valid CA file")
     return ssl_context
 
 
 if __name__ == "__main__":
-    ssl_ctx = create_ssl_context()
-    uvicorn.run(
-        "src.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        ssl_keyfile=settings.TLS_KEY_FILE if ssl_ctx else None,
-        ssl_certfile=settings.TLS_CERT_FILE if ssl_ctx else None,
-        reload=False,
-    )
+    from src.transport import VerifiedTLSProtocol
+
+    config = uvicorn.Config(app, host=settings.HOST, port=settings.PORT,
+                            http=VerifiedTLSProtocol, proxy_headers=False,
+                            access_log=False)
+    config.load()
+    config.ssl = create_ssl_context()
+    from src.transport import tls_exception_handler
+
+    async def serve():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(tls_exception_handler)
+        loop.slow_callback_duration = 1.0
+        await uvicorn.Server(config).serve()
+
+    # asyncio surfaces rejected TLS handshakes to its exception handler only
+    # with debug enabled; this records refusals that never reach ASGI.
+    asyncio.run(serve(), debug=True)
