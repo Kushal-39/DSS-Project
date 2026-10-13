@@ -28,4 +28,4 @@ datasources:
       derivedFields:
         - name: TraceID
           matcherRegex: '"traceparent"\s*:\s*"[0-9a-f]{2}-([0-9a-f]{32})'
-          url: 'http://localhost:16686/trace/$${__value.raw}'
+          url: '${JAEGER_BROWSER_URL}/trace/$${__value.raw}'

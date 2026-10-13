@@ -479,6 +479,7 @@ func flattenEnvelope(raw map[string]any) map[string]any {
 	// trail wants both as first-class fields, or "which role was denied, from
 	// where?" is unanswerable.
 	promoteObject(merged, "subject", "user_id", "sub", "username", "roles", "role")
+	promoteObject(merged, "context", "traceparent", "trace_id", "request_id")
 	if context, ok := merged["context"].(map[string]any); ok {
 		for _, field := range []string{"ip_address", "ip", "remote_addr", "client_ip"} {
 			if value, found := context[field]; found {
