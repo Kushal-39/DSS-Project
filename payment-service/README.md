@@ -109,7 +109,7 @@ Per `docs/division.md` §2, the service has these stricter defaults:
 {
   "sender_id": "uuid-string",
   "receiver_id": "uuid-string",
-  "amount": "50.00"
+  "amount": 50.00
 }
 ```
 
@@ -119,7 +119,7 @@ Per `docs/division.md` §2, the service has these stricter defaults:
   "txn_id": "uuid-string",
   "sender_id": "uuid-string",
   "receiver_id": "uuid-string",
-  "amount": "50.00",
+  "amount": 50.00,
   "created_at": "2024-01-15T10:30:00Z"
 ```
 
@@ -240,3 +240,14 @@ Person 5 interfaces with all other persons:
 - **Immutable ledger**: `transactions` table has triggers that reject UPDATE, DELETE, and TRUNCATE
 - **Fail-closed design**: Policy engine down = 403 Forbidden; account service error = 400 Bad Request
 - **Sender binding**: By default, `sender_id` must match the JWT `sub` claim; configurable via `PAYMENT_ENFORCE_SENDER_BINDING`
+
+## Integrated deployment
+
+The root Compose stack now provisions certificates into named volumes. Each
+runtime mounts only its own leaf keys; the CA signing key remains in the
+provisioning volume. Business ports are internal to Docker; access payments
+through the gateway on port 8080. The account listener now serves strict mTLS,
+so the synchronous deduction uses the shared CA without an insecure override.
+Use `scripts/test-all.sh` from the root to build and exercise the full stack.
+The original host-certificate curl instructions above describe the component's
+standalone milestone, not the current integrated deployment.

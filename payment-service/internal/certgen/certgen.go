@@ -100,6 +100,7 @@ func AllFiles() []string {
 		AccountServiceFile, AccountServiceKeyFile,
 		GatewayFile, GatewayKeyFile,
 		ProbeFile, ProbeKeyFile,
+		"account-server.crt", "account-server.key",
 	}
 }
 
@@ -235,11 +236,18 @@ func WriteBundle(dir string, hosts []string, force bool) (bool, error) {
 		return false, err
 	}
 
+	accountServer, err := ca.Issue("account-service", true, []string{"account-service", "localhost"}, DefaultLoopback)
+	if err != nil {
+		return false, err
+	}
+
 	files := []struct {
 		name    string
 		pem     []byte
 		private bool
 	}{
+		{"account-server.crt", accountServer.CertPEM, false},
+		{"account-server.key", accountServer.KeyPEM, true},
 		{CAFile, ca.CertPEM, false},
 		{CAKeyFile, ca.KeyPEM, true},
 		{ServerFile, server.CertPEM, false},
