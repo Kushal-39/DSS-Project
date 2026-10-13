@@ -15,3 +15,8 @@ bin/
 payment-server
 payment-server.exe
 certs/
+
+.env
+certs
+*.key
+*.pem

@@ -11,3 +11,8 @@ bin/
 **/*.test
 telemetry
 shipper
+
+.env
+certs
+*.key
+*.pem
