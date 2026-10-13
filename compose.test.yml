@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: dss-test
+      POSTGRES_DB: dss_test
+    ports:
+      - "127.0.0.1:${DSS_TEST_DATABASE_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dss_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  gateway:
+    ports: !override
+      - "127.0.0.1:18080:8080"
+  telemetry-collector:
+    ports: !override
+      - "127.0.0.1:18089:8089"
+  jaeger:
+    ports: !override
+      - "127.0.0.1:26686:16686"
+  loki:
+    ports: !override
+      - "127.0.0.1:13100:3100"
+  grafana:
+    environment:
+      JAEGER_BROWSER_URL: http://localhost:26686
+    ports: !override
+      - "127.0.0.1:13300:3000"
+  idp:
+    environment:
+      DATABASE_URL: postgres://postgres:dss-test@postgres:5432/dss_test?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  account-service:
+    environment:
+      DATABASE_URL: postgres://postgres:dss-test@postgres:5432/dss_test?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  payment-service:
+    environment:
+      DATABASE_URL: postgres://postgres:dss-test@postgres:5432/dss_test?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  telemetry:
+    ports: !override
+      - "127.0.0.1:18088:8088"
+    environment:
+      DATABASE_URL: postgres://postgres:dss-test@postgres:5432/dss_test?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  promtail:
+    environment:
+      COMPOSE_PROJECT_NAME: dss-e2e
+networks:
+  default:
+    enable_ipv6: false
