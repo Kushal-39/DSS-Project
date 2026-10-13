@@ -173,7 +173,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Claims, error) {
 }
 
 func (v *Verifier) parserOptions() []jwt.ParserOption {
-	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256"})}
+	options := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256"}), jwt.WithExpirationRequired()}
 	if v.skew > 0 {
 		options = append(options, jwt.WithLeeway(v.skew))
 	}
