@@ -132,3 +132,12 @@ docker run --rm --network <project>_default curlimages/curl:latest -s \
   itself being an open endpoint.
 - TLS/mTLS listener (`--tls-cert-file`, `--tls-ca-cert-file`) once the
   shared self-signed CA from the Transport Contract exists.
+
+## Integrated deployment
+
+The root stack now enables console decision logs and policy watching. Balance
+reads use `READ_ACCOUNT`: a customer may read only `account_<subject user_id>`.
+All allow rules, including the administrator override, require a non-empty
+identity/action/resource and a verified mTLS context. See the root README for
+the integrated runtime and the complete test runner; the roadmap above records
+the original component milestone.

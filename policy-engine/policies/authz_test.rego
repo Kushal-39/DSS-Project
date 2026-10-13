@@ -153,3 +153,28 @@ test_amount_as_string_denied if {
 	payload := object.union(customer_transfer, {"context": {"amount": "50", "mTLS_verified": true}})
 	not authz.allow.allow with input as payload
 }
+
+test_customer_read_own_account_allowed if {
+	payload := object.union(customer_transfer, {"action": "READ_ACCOUNT", "resource": sprintf("account_%s", [customer_transfer.subject.user_id])})
+	authz.allow.allow with input as payload
+}
+
+test_customer_read_other_account_denied if {
+	payload := object.union(customer_transfer, {"action": "READ_ACCOUNT", "resource": "account_someone_else"})
+	not authz.allow.allow with input as payload
+}
+
+test_customer_read_without_mtls_denied if {
+	payload := object.union(customer_transfer, {"action": "READ_ACCOUNT", "resource": sprintf("account_%s", [customer_transfer.subject.user_id]), "context": {"mTLS_verified": false}})
+	not authz.allow.allow with input as payload
+}
+
+test_admin_without_mtls_denied if {
+	payload := object.union(admin, {"context": {"mTLS_verified": false}})
+	not authz.allow.allow with input as payload
+}
+
+test_admin_without_identity_denied if {
+	payload := object.union(admin, {"subject": {"user_id": "", "roles": ["admin"]}})
+	not authz.allow.allow with input as payload
+}

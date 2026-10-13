@@ -33,6 +33,7 @@ allow := {"allow": true} if {
 # Still requires the subject block to be well-formed.
 # ---------------------------------------------------------------------
 authorized if {
+	valid_request
 	is_object(input.subject)
 	"admin" in input.subject.roles
 }
@@ -48,11 +49,36 @@ authorized if {
 # must send the policymaker.md shape exactly.
 # ---------------------------------------------------------------------
 authorized if {
+	valid_request
 	input.action == "TRANSFER"
 	is_object(input.subject)
 	"customer" in input.subject.roles
 	is_object(input.context)
+	is_number(input.context.amount)
 	input.context.amount <= max_transfer_amount
 	input.context.amount > 0
+	input.context.mTLS_verified == true
+}
+
+# Reading balances is sensitive too: customers may read only their own account.
+authorized if {
+	valid_request
+	input.action == "READ_ACCOUNT"
+	"customer" in input.subject.roles
+	input.resource == sprintf("account_%s", [input.subject.user_id])
+	input.context.mTLS_verified == true
+}
+
+# A privileged role never substitutes for an attributable, verified request.
+valid_request if {
+	is_object(input.subject)
+	is_string(input.subject.user_id)
+	input.subject.user_id != ""
+	is_array(input.subject.roles)
+	is_string(input.action)
+	input.action != ""
+	is_string(input.resource)
+	input.resource != ""
+	is_object(input.context)
 	input.context.mTLS_verified == true
 }
