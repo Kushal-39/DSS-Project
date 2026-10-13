@@ -19,7 +19,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -57,6 +59,8 @@ func New(logger *slog.Logger, store auth.Store, issuer *auth.Issuer, signKey *ke
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /token", s.handleLogin)
+	mux.HandleFunc("GET /jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOpenIDConfig)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -68,7 +72,7 @@ func New(logger *slog.Logger, store auth.Store, issuer *auth.Issuer, signKey *ke
 // middleware applies, in order: panic recovery (outermost), request logging,
 // then security response headers.
 func (s *Server) middleware(next http.Handler) http.Handler {
-	return s.recoverPanics(s.logRequests(s.securityHeaders(next)))
+	return s.traceRequests(s.recoverPanics(s.logRequests(s.securityHeaders(next))))
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -134,15 +138,28 @@ type loginRequest struct {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+		return
+	}
+
 	// The gateway's rate limiting protects against brute force at the edge;
 	// here we only enforce a sane body size bound.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
 		return
 	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one JSON object")
+		return
+	}
+
 	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "username and password are required")
 		return
@@ -182,9 +199,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":      token,
-		"token_type": "Bearer",
-		"expires_in": int(expiresAt.Sub(now).Seconds()),
+		"token":        token,
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   int(expiresAt.Sub(now).Seconds()),
 		"user": map[string]string{
 			"id":       user.UserID,
 			"username": user.Username,
