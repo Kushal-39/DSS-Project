@@ -149,9 +149,8 @@ func (t *Tracer) Record(span Span) {
 		return
 	}
 	t.closeMu.Lock()
-	closed := t.closed
-	t.closeMu.Unlock()
-	if closed {
+	defer t.closeMu.Unlock()
+	if t.closed {
 		return
 	}
 

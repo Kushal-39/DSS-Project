@@ -15,6 +15,7 @@ import (
 // span is the subset of the OTLP/JSON payload the telemetry service reads
 // (telemetry/internal/otlp/otlp.go), which is what makes a span joinable.
 type received struct {
+	mu       sync.Mutex
 	Requests int
 	Spans    []map[string]any
 	Services []string
@@ -24,7 +25,6 @@ type received struct {
 func receiver(t *testing.T, status int) (*httptest.Server, *received) {
 	t.Helper()
 	state := &received{}
-	var mu sync.Mutex
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -43,8 +43,8 @@ func receiver(t *testing.T, status int) (*httptest.Server, *received) {
 				} `json:"scopeSpans"`
 			} `json:"resourceSpans"`
 		}
-		mu.Lock()
-		defer mu.Unlock()
+		state.mu.Lock()
+		defer state.mu.Unlock()
 		state.Requests++
 		state.Token = r.Header.Get("X-Telemetry-Token")
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -75,6 +75,7 @@ func TestRecordExportsOTLPJSONTheTelemetryPipelineCanJoin(t *testing.T) {
 		ServiceName: "payment-service",
 		Timeout:     time.Second,
 	})
+	t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 	if !tracer.Enabled() {
 		t.Fatal("a configured endpoint must enable export")
 	}
@@ -93,9 +94,13 @@ func TestRecordExportsOTLPJSONTheTelemetryPipelineCanJoin(t *testing.T) {
 	})
 
 	waitFor(t, func() bool {
+		state.mu.Lock()
+		defer state.mu.Unlock()
 		return len(state.Spans) == 1
 	}, "the span to be exported")
 
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	span := state.Spans[0]
 	if span["traceId"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
 		t.Errorf("traceId = %v", span["traceId"])
@@ -142,6 +147,7 @@ func TestRecordExportsOTLPJSONTheTelemetryPipelineCanJoin(t *testing.T) {
 func TestAnErrorStatusIsReportedAsOTLPError(t *testing.T) {
 	server, state := receiver(t, http.StatusOK)
 	tracer := New(Options{Endpoint: server.URL, Timeout: time.Second})
+	t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 
 	tracer.Record(Span{
 		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -153,7 +159,9 @@ func TestAnErrorStatusIsReportedAsOTLPError(t *testing.T) {
 		Status:  StatusError,
 	})
 
-	waitFor(t, func() bool { return len(state.Spans) == 1 }, "the span to be exported")
+	waitFor(t, func() bool { state.mu.Lock(); defer state.mu.Unlock(); return len(state.Spans) == 1 }, "the span to be exported")
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	status, _ := state.Spans[0]["status"].(map[string]any)
 	if status["code"] != "STATUS_CODE_ERROR" {
 		t.Errorf("status = %v", state.Spans[0]["status"])
@@ -166,6 +174,7 @@ func TestAnErrorStatusIsReportedAsOTLPError(t *testing.T) {
 func TestRecordNeverBlocksOnADeadExporter(t *testing.T) {
 	server, _ := receiver(t, http.StatusInternalServerError)
 	tracer := New(Options{Endpoint: server.URL, Timeout: time.Second, QueueSize: 2})
+	t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 
 	done := make(chan struct{})
 	go func() {
@@ -202,6 +211,7 @@ func TestDisabledTracerDoesNothing(t *testing.T) {
 func TestRecordIgnoresSpansWithoutATrace(t *testing.T) {
 	server, state := receiver(t, http.StatusOK)
 	tracer := New(Options{Endpoint: server.URL, Timeout: time.Second})
+	t.Cleanup(func() { _ = tracer.Shutdown(context.Background()) })
 
 	// A span without a trace id cannot be joined to a flow, so exporting it
 	// would only add noise to the trace view.
@@ -209,6 +219,8 @@ func TestRecordIgnoresSpansWithoutATrace(t *testing.T) {
 	tracer.Record(Span{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", Name: "orphan"})
 
 	time.Sleep(150 * time.Millisecond)
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	if state.Requests != 0 {
 		t.Errorf("a span with no trace id was exported (%d requests)", state.Requests)
 	}
@@ -224,4 +236,23 @@ func waitFor(t *testing.T, condition func() bool, what string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestConcurrentRecordAndShutdown(t *testing.T) {
+	server, _ := receiver(t, http.StatusOK)
+	tracer := New(Options{Endpoint: server.URL, Timeout: time.Second})
+	var writers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for j := 0; j < 500; j++ {
+				tracer.Record(Span{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", Name: "concurrent", Start: time.Now(), End: time.Now()})
+			}
+		}()
+	}
+	if err := tracer.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writers.Wait()
 }
