@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt .
+COPY account-service/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -42,9 +42,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Copy application source & migrations
-COPY migrations ./migrations
-COPY src ./src
-COPY entrypoint.sh ./entrypoint.sh
+COPY account-service/migrations ./migrations
+COPY account-service/src ./src
+COPY common ./common
+COPY account-service/entrypoint.sh ./entrypoint.sh
 
 RUN chmod +x ./entrypoint.sh && chown -R account:account /app
 

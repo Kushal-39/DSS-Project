@@ -26,6 +26,9 @@ class Settings(BaseSettings):
         "IDP_JWKS_URL", "http://idp:8080/.well-known/jwks.json"
     )
 
+    JWT_ISSUER: str = "http://idp:8080"
+    JWT_AUDIENCE: str = "zerotrust-api-gateway"
+
     # Policy & Auth timeouts (seconds)
     POLICY_TIMEOUT_SECONDS: float = 2.0
     JWKS_CACHE_TTL_SECONDS: int = 300

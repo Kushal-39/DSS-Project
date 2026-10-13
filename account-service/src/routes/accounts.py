@@ -42,24 +42,30 @@ async def deduct_balance(
     )
 
 
-@router.get(
-    "/{user_id}",
-    response_model=AccountResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Get user account balance and status",
-)
-async def get_account(
-    user_id: UUID,
-    claims: TokenClaims = Depends(get_current_user),
-):
-    """
-    Fetch account balance and status.
-    Requires caller to be the account owner or an admin.
-    """
-    if claims.sub != str(user_id) and "admin" not in claims.roles:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Cannot view another user's account",
-        )
+async def read_authorized_account(user_id: UUID, request: Request, claims: TokenClaims):
+    from decimal import Decimal
+    from src.policy import policy_client
+    from src.middleware import log_audit_event
 
+    if claims.sub != str(user_id) and "admin" not in claims.roles:
+        raise HTTPException(status_code=403, detail="Forbidden: Cannot view another user's account")
+    resource = f"account_{user_id}"
+    allowed, reason = await policy_client.evaluate(
+        user_id=claims.sub, roles=claims.roles, action="READ_ACCOUNT", resource=resource,
+        amount=Decimal("0"), ip_address=request.state.client_ip,
+        mtls_verified=request.state.mtls_verified)
+    log_audit_event("access_decision", "permit" if allowed else "deny", "READ_ACCOUNT", resource,
+                    user_id=claims.sub, traceparent=request.state.traceparent, reason=reason)
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Policy authorization rejected")
     return await account_service.get_account_details(user_id)
+
+
+@router.get("", response_model=AccountResponse)
+async def get_own_account(request: Request, claims: TokenClaims = Depends(get_current_user)):
+    return await read_authorized_account(UUID(claims.sub), request, claims)
+
+
+@router.get("/{user_id}", response_model=AccountResponse)
+async def get_account(user_id: UUID, request: Request, claims: TokenClaims = Depends(get_current_user)):
+    return await read_authorized_account(user_id, request, claims)

@@ -33,7 +33,7 @@ async def readiness(response: Response):
     except Exception:
         policy_engine_ok = False
 
-    is_ready = db_ok
+    is_ready = db_ok and policy_engine_ok
 
     if not is_ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

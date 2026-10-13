@@ -6,6 +6,8 @@ import sys
 import time
 from datetime import datetime, timezone
 import uuid
+import re
+from starlette.responses import JSONResponse
 from typing import Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -73,7 +75,7 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
 
         # 1. W3C traceparent extraction or synthesis
         traceparent = request.headers.get("traceparent")
-        if not traceparent or not traceparent.startswith("00-"):
+        if not traceparent or not re.fullmatch(r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}", traceparent):
             traceparent = generate_traceparent()
         request.state.traceparent = traceparent
 
@@ -90,13 +92,10 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         # 3. Detect mTLS verification
         # Checks if TLS client cert was provided or forwarded by proxy
         mtls_verified = False
-        client_cert_hdr = request.headers.get("X-Forwarded-Client-Cert") or request.headers.get("X-Client-Cert-Present")
-        if client_cert_hdr:
+        certificate = request.scope.get("client_cert")
+        if certificate:
             mtls_verified = True
-        elif request.scope.get("client_cert") is not None:
-            mtls_verified = True
-        elif not settings.TLS_REQUIRE_CLIENT_CERT and settings.ENVIRONMENT != "production":
-            # For local dev without CA certificates yet provisioned
+        elif not settings.TLS_REQUIRE_CLIENT_CERT and settings.ENVIRONMENT == "test":
             mtls_verified = True
 
         request.state.mtls_verified = mtls_verified
@@ -112,6 +111,15 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                 remote_addr=client_ip,
                 reason="no_client_certificate",
             )
+
+        if settings.TLS_REQUIRE_CLIENT_CERT:
+            if not mtls_verified:
+                return JSONResponse({"detail": "Verified client certificate required"}, status_code=403)
+            identities = [value for group in certificate.get("subject", ())
+                          for name, value in group if name == "commonName"]
+            allowed = {"gateway", "payment-service-client", "account-service"}
+            if request.url.path not in {"/healthz", "/readyz"} and not allowed.intersection(identities):
+                return JSONResponse({"detail": "Client identity not allowed"}, status_code=403)
 
         try:
             response = await call_next(request)

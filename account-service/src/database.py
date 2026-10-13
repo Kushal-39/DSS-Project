@@ -73,11 +73,11 @@ class Database:
             migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
 
         if not migrations_dir.exists():
-            logger.warning(f"Migrations directory not found at {migrations_dir}")
-            return
+            raise RuntimeError("Account migrations directory is missing")
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(428001)")
                 # Migration tracking table
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS _account_schema_migrations (

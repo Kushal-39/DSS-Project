@@ -25,7 +25,9 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.json(), {"status": "ok"})
 
     def test_readyz_endpoint_healthy(self):
-        with patch("src.routes.health.db.is_healthy", new_callable=AsyncMock) as mock_db_health:
+        with patch("src.routes.health.db.is_healthy", new_callable=AsyncMock) as mock_db_health, \
+             patch("src.routes.health.httpx.AsyncClient.get", new_callable=AsyncMock) as mock_policy_health:
+            mock_policy_health.return_value.status_code = 200
             mock_db_health.return_value = True
             resp = self.client.get("/readyz")
             self.assertEqual(resp.status_code, 200)

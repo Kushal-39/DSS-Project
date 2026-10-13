@@ -13,4 +13,4 @@ echo "[account-service] entrypoint: starting (pid $$)"
 # Database connection and schema migrations are automatically executed
 # in the application lifespan startup handler.
 echo "[account-service] starting web server on port ${PORT:-8082}..."
-exec python -m uvicorn src.main:app --host 0.0.0.0 --port "${PORT:-8082}"
+exec python -m src.main

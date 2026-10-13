@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class DeductRequest(BaseModel):
     """Request contract for POST /api/v1/accounts/deduct (docs/contacts.md)."""
     user_id: UUID = Field(..., description="UUID of the account owner to deduct from")
-    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Positive deduction amount")
+    amount: Decimal = Field(..., gt=Decimal("0.00"), max_digits=10, decimal_places=2, allow_inf_nan=False, description="Positive deduction amount")
 
 
 class DeductResponse(BaseModel):
